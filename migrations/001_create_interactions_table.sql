@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS interactions (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ,
     reply_count INT NOT NULL DEFAULT 0,
-    depth INT NOT NULL DEFAULT 0
+    depth INT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 1
 );
 
 -- Index for group feed pagination (root posts only, newest first)

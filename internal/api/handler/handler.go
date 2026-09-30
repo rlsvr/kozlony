@@ -20,9 +20,17 @@ import (
 
 var _ server.ServerInterface = (*Handler)(nil)
 
+const (
+	errInteractionNotFound = "interaction not found"
+	maxTitleLength         = 255
+	maxBodyLength          = 65535
+	maxAuthorLength        = 100
+)
+
 // Publisher sends interaction events to the JetStream message broker.
 type Publisher interface {
 	PublishInteractionCreated(ctx context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error)
+	PublishInteractionEdited(ctx context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error)
 }
 
 // Handler implements server.ServerInterface.
@@ -50,14 +58,20 @@ func (*Handler) GetReadyz(ctx echo.Context) error {
 }
 
 // CreateInteraction handles creating new posts and replies, publishing them to JetStream.
-func (h *Handler) CreateInteraction(ctx echo.Context) error {
+func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateInteractionParams) error {
 	var req server.CreateInteractionRequest
 	if err := ctx.Bind(&req); err != nil {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "invalid request payload"})
 	}
 
-	if req.Author == "" || req.Body == "" {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "author and body are required"})
+	if req.Author == "" || len(req.Author) > maxAuthorLength {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "author is required and must not exceed 100 characters"})
+	}
+	if req.Body == "" || len(req.Body) > maxBodyLength {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "body is required and must not exceed 65535 characters"})
+	}
+	if req.Title != nil && len(*req.Title) > maxTitleLength {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
 	}
 
 	groupID := "root"
@@ -65,10 +79,24 @@ func (h *Handler) CreateInteraction(ctx echo.Context) error {
 		groupID = *req.GroupId
 	}
 
-	newID, err := uuid.NewV7()
+	idempotencyKey := ""
+	if params.IdempotencyKey != nil && *params.IdempotencyKey != "" {
+		idempotencyKey = *params.IdempotencyKey
+	} else if hKey := ctx.Request().Header.Get("Idempotency-Key"); hKey != "" {
+		idempotencyKey = hKey
+	}
+
+	newID, err := resolveInteractionID(idempotencyKey)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to generate UUIDv7")
 		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to generate interaction ID"})
+	}
+
+	if idempotencyKey != "" && h.repo != nil {
+		existing, err := h.repo.GetByID(ctx.Request().Context(), newID)
+		if err == nil && existing != nil {
+			return ctx.JSON(http.StatusOK, toAPIInteraction(existing))
+		}
 	}
 
 	now := time.Now().UTC()
@@ -94,6 +122,7 @@ func (h *Handler) CreateInteraction(ctx echo.Context) error {
 		ReplyCount: 0,
 		RootID:     rootIDStr,
 		Title:      req.Title,
+		Version:    1,
 	}
 
 	if h.publisher != nil {
@@ -113,9 +142,64 @@ func (h *Handler) CreateInteraction(ctx echo.Context) error {
 		ReplyCount: 0,
 		Depth:      depth,
 		ParentId:   req.ParentId,
+		Version:    1,
 	}
 
 	return ctx.JSON(http.StatusCreated, resp)
+}
+
+// UpdateInteraction handles editing an interaction's title and body with version verification.
+func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error {
+	var req server.UpdateInteractionRequest
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "invalid request payload"})
+	}
+
+	if req.Body == "" || len(req.Body) > maxBodyLength {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "body is required and must not exceed 65535 characters"})
+	}
+	if req.Title != nil && len(*req.Title) > maxTitleLength {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
+	}
+	if req.Version < 1 {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "version must be a positive integer"})
+	}
+
+	if h.repo == nil {
+		return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
+	}
+
+	updated, err := h.repo.Update(ctx.Request().Context(), id, req.Version, req.Title, req.Body)
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
+		}
+		if errors.Is(err, database.ErrVersionConflict) {
+			return ctx.JSON(http.StatusConflict, server.ErrorResponse{Error: "version conflict: interaction was modified by another client"})
+		}
+		log.Error().Err(err).Str("id", id.String()).Msg("failed to update interaction")
+		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to update interaction"})
+	}
+
+	if h.publisher != nil {
+		updatedAt := time.Now().UTC()
+		if updated.UpdatedAt != nil {
+			updatedAt = *updated.UpdatedAt
+		}
+		evt := events.InteractionEditedEvent{
+			Body:      updated.Body,
+			GroupID:   updated.GroupID,
+			ID:        updated.ID.String(),
+			Title:     updated.Title,
+			UpdatedAt: updatedAt,
+			Version:   updated.Version,
+		}
+		if _, err := h.publisher.PublishInteractionEdited(ctx.Request().Context(), &evt); err != nil {
+			log.Error().Err(err).Str("id", id.String()).Int("version", updated.Version).Msg("failed to publish interaction edited event")
+		}
+	}
+
+	return ctx.JSON(http.StatusOK, toAPIInteraction(updated))
 }
 
 // ListInteractions handles listing root posts for the main feed.
@@ -157,8 +241,6 @@ func (h *Handler) ListInteractions(ctx echo.Context, params server.ListInteracti
 		NextCursor:   nextCursor,
 	})
 }
-
-const errInteractionNotFound = "interaction not found"
 
 // GetInteraction handles fetching a post along with its replies.
 func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error {
@@ -207,6 +289,7 @@ func toAPIInteraction(item *database.Interaction) server.Interaction {
 		UpdatedAt:  item.UpdatedAt,
 		ReplyCount: item.ReplyCount,
 		Depth:      item.Depth,
+		Version:    item.Version,
 	}
 	if item.RootID != nil {
 		res.RootId = item.RootID
@@ -215,4 +298,14 @@ func toAPIInteraction(item *database.Interaction) server.Interaction {
 		res.ParentId = item.ParentID
 	}
 	return res
+}
+
+func resolveInteractionID(idempotencyKey string) (uuid.UUID, error) {
+	if idempotencyKey == "" {
+		return uuid.NewV7()
+	}
+	if parsed, err := uuid.Parse(idempotencyKey); err == nil {
+		return parsed, nil
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey)), nil
 }

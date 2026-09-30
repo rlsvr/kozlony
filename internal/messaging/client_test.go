@@ -53,6 +53,7 @@ func TestEventSerialization(t *testing.T) {
 		ReplyCount: 0,
 		RootID:     &rootID,
 		Title:      &title,
+		Version:    1,
 	}
 
 	data, err := json.Marshal(evt)
@@ -76,6 +77,33 @@ func TestEventSerialization(t *testing.T) {
 	}
 	if *decoded.Title != title {
 		t.Errorf("expected Title %s, got %s", title, *decoded.Title)
+	}
+	if decoded.Version != 1 {
+		t.Errorf("expected Version 1, got %d", decoded.Version)
+	}
+
+	// Test InteractionEditedEvent with version
+	editedTitle := "Updated Title"
+	editEvt := events.InteractionEditedEvent{
+		Body:      "Updated body content",
+		GroupID:   "general",
+		ID:        "01923f12-0000-7000-8000-000000000002",
+		Title:     &editedTitle,
+		UpdatedAt: time.Now().UTC(),
+		Version:   2,
+	}
+
+	editData, err := json.Marshal(editEvt)
+	if err != nil {
+		t.Fatalf("failed to marshal edit event: %v", err)
+	}
+
+	var decodedEdit events.InteractionEditedEvent
+	if err := json.Unmarshal(editData, &decodedEdit); err != nil {
+		t.Fatalf("failed to unmarshal edit event: %v", err)
+	}
+	if decodedEdit.Version != 2 {
+		t.Errorf("expected edit version 2, got %d", decodedEdit.Version)
 	}
 }
 

@@ -41,6 +41,7 @@ func TestInteractionModel(t *testing.T) {
 		CreatedAt:  now,
 		ReplyCount: 0,
 		Depth:      0,
+		Version:    1,
 	}
 
 	if item.ID != id {
@@ -51,5 +52,8 @@ func TestInteractionModel(t *testing.T) {
 	}
 	if *item.Title != title {
 		t.Errorf("expected title %s, got %s", title, *item.Title)
+	}
+	if item.Version != 1 {
+		t.Errorf("expected version 1, got %d", item.Version)
 	}
 }
