@@ -19,10 +19,6 @@ import (
 )
 
 // BatchFetcher fetches a micro-batch of messages from the broker.
-//
-// It is deliberately not named after the JetStream consumer it wraps: the durable
-// pull consumer lives behind this interface (see messaging.DrainerConsumer), and all
-// the drainer needs from it is the ability to pull up to batch messages.
 type BatchFetcher interface {
 	Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
 }
