@@ -2,7 +2,6 @@ package config_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -30,14 +29,9 @@ func TestConfigLoadDefaults(t *testing.T) {
 }
 
 func TestConfigLoadEnvOverride(t *testing.T) {
-	os.Setenv("ADDR", ":9090")
-	os.Setenv("NATS_STREAM_NAME", "CUSTOM_BOARD")
-	os.Setenv("DRAIN_FLUSH_INTERVAL", "100ms")
-	defer func() {
-		os.Unsetenv("ADDR")
-		os.Unsetenv("NATS_STREAM_NAME")
-		os.Unsetenv("DRAIN_FLUSH_INTERVAL")
-	}()
+	t.Setenv("ADDR", ":9090")
+	t.Setenv("NATS_STREAM_NAME", "CUSTOM_BOARD")
+	t.Setenv("DRAIN_FLUSH_INTERVAL", "100ms")
 
 	cfg, err := config.Load(context.Background())
 	if err != nil {
