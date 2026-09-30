@@ -1,0 +1,90 @@
+asyncapi: "3.0.0"
+id: "urn:asyncapi:kozlony:message-board"
+defaultContentType: "application/json"
+info:
+  title: Message Board Messaging API
+  version: "0.1.0"
+  description: AsyncAPI specification for NATS JetStream event streaming and commands.
+
+servers:
+  local:
+    host: "localhost:4222"
+    protocol: "nats"
+    description: "Local NATS server."
+
+channels:
+  interactionCreated:
+    address: "BOARD.{groupId}.evt.created"
+    description: "Event emitted when a new post or reply is created."
+    parameters:
+      groupId:
+        $ref: "#/components/parameters/groupId"
+    messages:
+      interactionCreatedEvent:
+        $ref: "#/components/messages/InteractionCreatedEvent"
+
+  interactionEdited:
+    address: "BOARD.{groupId}.evt.edited"
+    description: "Event emitted when an existing interaction is edited."
+    parameters:
+      groupId:
+        $ref: "#/components/parameters/groupId"
+    messages:
+      interactionEditedEvent:
+        $ref: "#/components/messages/InteractionEditedEvent"
+
+  createInteractionCommand:
+    address: "BOARD.{groupId}.cmd.create"
+    description: "Command to ingest a new interaction."
+    parameters:
+      groupId:
+        $ref: "#/components/parameters/groupId"
+    messages:
+      createInteractionCommand:
+        $ref: "#/components/messages/CreateInteractionCommand"
+
+operations:
+  sendInteractionCreated:
+    action: "send"
+    channel:
+      $ref: "#/channels/interactionCreated"
+    summary: "Publish interaction created event."
+
+  sendInteractionEdited:
+    action: "send"
+    channel:
+      $ref: "#/channels/interactionEdited"
+    summary: "Publish interaction edited event."
+
+  receiveCreateInteraction:
+    action: "receive"
+    channel:
+      $ref: "#/channels/createInteractionCommand"
+    summary: "Receive create interaction command."
+
+components:
+  parameters:
+    groupId:
+      description: "Board or group identifier."
+
+  messages:
+    InteractionCreatedEvent:
+      name: interaction_created
+      title: Interaction Created Event
+      summary: Broadcast when an interaction has been created.
+      payload:
+        $ref: "./events/interaction-created/v0.1.0.json"
+
+    InteractionEditedEvent:
+      name: interaction_edited
+      title: Interaction Edited Event
+      summary: Broadcast when an interaction has been modified.
+      payload:
+        $ref: "./events/interaction-edited/v0.1.0.json"
+
+    CreateInteractionCommand:
+      name: create_interaction
+      title: Create Interaction Command
+      summary: Ingestion command for an interaction.
+      payload:
+        $ref: "./commands/create-interaction/v0.1.0.json"

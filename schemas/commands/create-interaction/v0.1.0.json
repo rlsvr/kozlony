@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/commands/create-interaction/v0.1.0.json",
+  "title": "CreateInteractionCommand",
+  "description": "Command payload to create a new interaction.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "body",
+    "author"
+  ],
+  "properties": {
+    "group_id": {
+      "type": "string",
+      "default": "root",
+      "description": "Board or group identifier."
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Parent interaction UUID for replies."
+    },
+    "title": {
+      "type": ["string", "null"],
+      "description": "Title for root posts."
+    },
+    "body": {
+      "type": "string",
+      "description": "Body content."
+    },
+    "author": {
+      "type": "string",
+      "description": "Author name."
+    }
+  }
+}
