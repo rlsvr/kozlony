@@ -1,0 +1,22 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.out
+
+# Local environment
+.env
+.env-secret
+tmp/
+
+# IDEs
+.idea/
+.vscode/
+.DS_Store
