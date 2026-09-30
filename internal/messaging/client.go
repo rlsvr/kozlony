@@ -13,9 +13,9 @@ import (
 	qpnats "github.com/rlsvr/hirnok/pkg/nats"
 	"github.com/rs/zerolog/log"
 
-	"kozlony/internal/config"
-	"kozlony/internal/messaging/commands"
-	"kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/messaging/commands"
+	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
 // Client manages the NATS JetStream connection, pull consumers, and publishers via hirnok.

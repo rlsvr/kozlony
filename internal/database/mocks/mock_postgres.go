@@ -11,13 +11,13 @@ package mocks
 
 import (
 	context "context"
-	database "kozlony/internal/database"
 	reflect "reflect"
 	time "time"
 
 	uuid "github.com/google/uuid"
 	pgx "github.com/jackc/pgx/v5"
 	pgconn "github.com/jackc/pgx/v5/pgconn"
+	database "github.com/rlsvr/kozlony/internal/database"
 	gomock "go.uber.org/mock/gomock"
 )
 

@@ -13,13 +13,17 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog/log"
 
-	"kozlony/internal/config"
-	"kozlony/internal/database"
-	"kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/database"
+	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
-// PullConsumer abstracts NATS JetStream pull consumption for micro-batch fetching.
-type PullConsumer interface {
+// BatchFetcher fetches a micro-batch of messages from the broker.
+//
+// It is deliberately not named after the JetStream consumer it wraps: the durable
+// pull consumer lives behind this interface (see messaging.DrainerConsumer), and all
+// the drainer needs from it is the ability to pull up to batch messages.
+type BatchFetcher interface {
 	Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
 }
 
@@ -30,7 +34,7 @@ type DLQPublisher interface {
 
 // Drainer micro-batches interaction events from NATS JetStream and bulk-inserts them into PostgreSQL.
 type Drainer struct {
-	consumer      PullConsumer
+	fetcher       BatchFetcher
 	repo          database.Repository
 	dlq           DLQPublisher
 	batchSize     int
@@ -38,7 +42,7 @@ type Drainer struct {
 }
 
 // New creates a new Drainer instance.
-func New(consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
+func New(fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	if cfg != nil {
@@ -51,7 +55,7 @@ func New(consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg 
 	}
 
 	return &Drainer{
-		consumer:      consumer,
+		fetcher:       fetcher,
 		repo:          repo,
 		dlq:           dlq,
 		batchSize:     batchSize,
@@ -62,7 +66,7 @@ func New(consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg 
 // ProcessBatch fetches a single batch of messages up to batchSize within flushInterval,
 // deserializes interaction events, writes them in bulk to PostgreSQL, and acknowledges them.
 func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
-	mb, err := d.consumer.Fetch(d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
+	mb, err := d.fetcher.Fetch(d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, nil
@@ -164,8 +168,8 @@ func (d *Drainer) Start(ctx context.Context) {
 }
 
 // Start creates a new Drainer and starts its background processing loop.
-func Start(ctx context.Context, consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
-	d := New(consumer, repo, dlq, cfg)
+func Start(ctx context.Context, fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
+	d := New(fetcher, repo, dlq, cfg)
 	d.Start(ctx)
 	return d
 }

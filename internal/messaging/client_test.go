@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"kozlony/internal/config"
-	"kozlony/internal/messaging"
-	"kozlony/internal/messaging/commands"
-	"kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/messaging"
+	"github.com/rlsvr/kozlony/internal/messaging/commands"
+	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
 func TestNewClientNilConfig(t *testing.T) {

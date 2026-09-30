@@ -1,4 +1,4 @@
-MODULE  := kozlony
+MODULE  := github.com/rlsvr/kozlony
 BINARY  := bin/kozlony
 CMD     := ./cmd/kozlony
 

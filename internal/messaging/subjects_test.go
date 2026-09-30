@@ -3,7 +3,7 @@ package messaging_test
 import (
 	"testing"
 
-	"kozlony/internal/messaging"
+	"github.com/rlsvr/kozlony/internal/messaging"
 )
 
 func TestSubjectGenerators(t *testing.T) {
@@ -50,7 +50,7 @@ func TestSubjectGenerators(t *testing.T) {
 		{
 			name:     "SubjectDeadLetter",
 			got:      messaging.SubjectDeadLetter("BOARD"),
-			expected: "BOARD.dead-letter",
+			expected: "BOARD.dlq",
 		},
 	}
 

@@ -11,7 +11,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - kozlony
+        - github.com/rlsvr/kozlony
 
 linters:
   default: none

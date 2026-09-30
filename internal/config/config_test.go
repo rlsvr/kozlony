@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/config"
 )
 
 func TestConfigLoadDefaults(t *testing.T) {

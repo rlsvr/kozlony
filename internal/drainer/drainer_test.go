@@ -13,12 +13,12 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"go.uber.org/mock/gomock"
 
-	"kozlony/internal/config"
-	"kozlony/internal/database"
-	dbmocks "kozlony/internal/database/mocks"
-	"kozlony/internal/drainer"
-	drainermocks "kozlony/internal/drainer/mocks"
-	"kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/database"
+	dbmocks "github.com/rlsvr/kozlony/internal/database/mocks"
+	"github.com/rlsvr/kozlony/internal/drainer"
+	drainermocks "github.com/rlsvr/kozlony/internal/drainer/mocks"
+	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
 type fakeMsg struct {
@@ -71,7 +71,7 @@ func TestProcessBatch_Success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	cfg := &config.Config{
@@ -132,7 +132,7 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	d := drainer.New(mockConsumer, mockRepo, nil, nil)
@@ -180,7 +180,7 @@ func TestProcessBatch_EmptyMessages(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	d := drainer.New(mockConsumer, mockRepo, nil, nil)
@@ -206,7 +206,7 @@ func TestProcessBatch_CorruptMessage_RoutesToDLQ(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 	mockDLQ := drainermocks.NewMockDLQPublisher(ctrl)
 
@@ -237,7 +237,7 @@ func TestDrainer_RunShutdown(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	d := drainer.New(mockConsumer, mockRepo, nil, nil)
@@ -254,7 +254,7 @@ func TestDrainer_Start(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	d := drainer.New(mockConsumer, mockRepo, nil, nil)
@@ -270,7 +270,7 @@ func TestDrainer_StartHelper(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
 	ctx, cancel := context.WithCancel(context.Background())
