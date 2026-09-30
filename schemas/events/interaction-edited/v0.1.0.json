@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/interaction-edited/v0.1.0.json",
+  "title": "InteractionEditedEvent",
+  "description": "Event emitted when an interaction is edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "group_id",
+    "body",
+    "updated_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Interaction UUID."
+    },
+    "group_id": {
+      "type": "string",
+      "description": "Board or group identifier."
+    },
+    "title": {
+      "type": ["string", "null"],
+      "description": "Updated title (for root posts)."
+    },
+    "body": {
+      "type": "string",
+      "description": "Updated body content."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when edited."
+    }
+  }
+}

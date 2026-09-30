@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/interaction-created/v0.1.0.json",
+  "title": "InteractionCreatedEvent",
+  "description": "Event emitted when a post or reply is created.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "group_id",
+    "body",
+    "author",
+    "created_at",
+    "reply_count",
+    "depth"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUIDv7 identifier."
+    },
+    "group_id": {
+      "type": "string",
+      "description": "Board or group identifier."
+    },
+    "root_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Pointer to the root post of the conversation."
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Pointer to the immediate parent interaction."
+    },
+    "title": {
+      "type": ["string", "null"],
+      "description": "Post title, null for replies."
+    },
+    "body": {
+      "type": "string",
+      "description": "Markdown content."
+    },
+    "author": {
+      "type": "string",
+      "description": "Author display name."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when created."
+    },
+    "reply_count": {
+      "type": "integer",
+      "description": "Direct replies count."
+    },
+    "depth": {
+      "type": "integer",
+      "description": "Tree depth (0 for root)."
+    }
+  }
+}
