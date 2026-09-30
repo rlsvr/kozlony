@@ -5,6 +5,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -28,10 +29,11 @@ const (
 	maxAuthorLength        = 100
 )
 
-// Publisher sends interaction events to the JetStream message broker.
+// Publisher sends interaction events to the JetStream message broker and subscribes to real-time events.
 type Publisher interface {
 	PublishInteractionCreated(ctx context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error)
 	PublishInteractionEdited(ctx context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error)
+	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
 }
 
 // Handler implements server.ServerInterface.
@@ -274,9 +276,49 @@ func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error 
 	})
 }
 
-// SubscribeLiveEvents handles real-time SSE streaming.
-func (*Handler) SubscribeLiveEvents(ctx echo.Context, _ server.SubscribeLiveEventsParams) error {
-	return ctx.NoContent(http.StatusNotImplemented)
+// StreamInteractions streams live interaction events to connected clients via Server-Sent Events (SSE).
+func (h *Handler) StreamInteractions(ctx echo.Context, params server.StreamInteractionsParams) error {
+	ctx.Response().Header().Set("Content-Type", "text/event-stream")
+	ctx.Response().Header().Set("Cache-Control", "no-cache")
+	ctx.Response().Header().Set("Connection", "keep-alive")
+	ctx.Response().Header().Set("Access-Control-Allow-Origin", "*")
+	ctx.Response().WriteHeader(http.StatusOK)
+	ctx.Response().Flush()
+
+	if h.publisher == nil {
+		return nil
+	}
+
+	reqCtx := ctx.Request().Context()
+	msgChan, cancelSub, err := h.publisher.SubscribeEvents(reqCtx, params.GroupId)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to subscribe to NATS events for SSE")
+		return nil
+	}
+	defer cancelSub()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-reqCtx.Done():
+			return nil
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(ctx.Response(), ":ping\n\n"); err != nil {
+				return nil
+			}
+			ctx.Response().Flush()
+		case msg, ok := <-msgChan:
+			if !ok {
+				return nil
+			}
+			if _, err := fmt.Fprintf(ctx.Response(), "data: %s\n\n", msg); err != nil {
+				return nil
+			}
+			ctx.Response().Flush()
+		}
+	}
 }
 
 func toAPIInteraction(item *database.Interaction) server.Interaction {
