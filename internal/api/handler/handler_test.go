@@ -37,6 +37,11 @@ func (m *mockPublisher) PublishInteractionEdited(_ context.Context, evt *events.
 	return &jetstream.PubAck{}, nil
 }
 
+func (*mockPublisher) SubscribeEvents(_ context.Context, _ *string) (<-chan []byte, func(), error) {
+	ch := make(chan []byte, 10)
+	return ch, func() {}, nil
+}
+
 type mockRepository struct {
 	items map[uuid.UUID]*database.Interaction
 }
@@ -380,5 +385,32 @@ func TestUpdateInteraction(t *testing.T) {
 	}
 	if recNotFound.Code != http.StatusNotFound {
 		t.Errorf("expected 404 Not Found, got %d", recNotFound.Code)
+	}
+}
+
+func TestStreamInteractions(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/interactions/stream", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := h.StreamInteractions(c, server.StreamInteractionsParams{})
+	if err != nil {
+		t.Fatalf("unexpected error from StreamInteractions: %v", err)
+	}
+
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Errorf("expected Content-Type text/event-stream, got %s", rec.Header().Get("Content-Type"))
 	}
 }

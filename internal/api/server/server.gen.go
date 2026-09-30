@@ -108,12 +108,6 @@ type UpdateInteractionRequest struct {
 	Version int `json:"version"`
 }
 
-// SubscribeLiveEventsParams defines parameters for SubscribeLiveEvents.
-type SubscribeLiveEventsParams struct {
-	// GroupId Optional board/group filter.
-	GroupId *string `form:"group_id,omitempty" json:"group_id,omitempty"`
-}
-
 // ListInteractionsParams defines parameters for ListInteractions.
 type ListInteractionsParams struct {
 	// GroupId Board/Group identifier (defaults to root).
@@ -132,6 +126,12 @@ type CreateInteractionParams struct {
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
+// StreamInteractionsParams defines parameters for StreamInteractions.
+type StreamInteractionsParams struct {
+	// GroupId Optional board/group filter.
+	GroupId *string `form:"group_id,omitempty" json:"group_id,omitempty"`
+}
+
 // CreateInteractionJSONRequestBody defines body for CreateInteraction for application/json ContentType.
 type CreateInteractionJSONRequestBody = CreateInteractionRequest
 
@@ -140,9 +140,6 @@ type UpdateInteractionJSONRequestBody = UpdateInteractionRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
-	// SubscribeLiveEvents Live event stream
-	// (GET /v1/events/live)
-	SubscribeLiveEvents(ctx echo.Context, params SubscribeLiveEventsParams) error
 	// GetHealthz Liveness probe
 	// (GET /v1/healthz)
 	GetHealthz(ctx echo.Context) error
@@ -152,6 +149,9 @@ type ServerInterface interface {
 	// CreateInteraction Create an interaction
 	// (POST /v1/interactions)
 	CreateInteraction(ctx echo.Context, params CreateInteractionParams) error
+	// StreamInteractions Stream interactions
+	// (GET /v1/interactions/stream)
+	StreamInteractions(ctx echo.Context, params StreamInteractionsParams) error
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx echo.Context, id openapi_types.UUID) error
@@ -166,24 +166,6 @@ type ServerInterface interface {
 // ServerInterfaceWrapper converts echo contexts to parameters.
 type ServerInterfaceWrapper struct {
 	Handler ServerInterface
-}
-
-// SubscribeLiveEvents converts echo context to params.
-func (w *ServerInterfaceWrapper) SubscribeLiveEvents(ctx echo.Context) error {
-	var err error
-
-	// Parameter object where we will unmarshal all parameters from the context
-	var params SubscribeLiveEventsParams
-	// ------------- Optional query parameter "group_id" -------------
-
-	err = runtime.BindQueryParameterWithOptions("form", true, false, "group_id", ctx.QueryParams(), &params.GroupId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter group_id: %s", err))
-	}
-
-	// Invoke the callback with all the unmarshaled arguments
-	err = w.Handler.SubscribeLiveEvents(ctx, params)
-	return err
 }
 
 // GetHealthz converts echo context to params.
@@ -253,6 +235,24 @@ func (w *ServerInterfaceWrapper) CreateInteraction(ctx echo.Context) error {
 
 	// Invoke the callback with all the unmarshaled arguments
 	err = w.Handler.CreateInteraction(ctx, params)
+	return err
+}
+
+// StreamInteractions converts echo context to params.
+func (w *ServerInterfaceWrapper) StreamInteractions(ctx echo.Context) error {
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params StreamInteractionsParams
+	// ------------- Optional query parameter "group_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "group_id", ctx.QueryParams(), &params.GroupId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter group_id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.StreamInteractions(ctx, params)
 	return err
 }
 
@@ -350,59 +350,8 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	router.POST(options.BaseURL+"/v1/interactions", wrapper.CreateInteraction, options.OperationMiddlewares["CreateInteraction"]...)
 	router.GET(options.BaseURL+"/v1/interactions/:id", wrapper.GetInteraction, options.OperationMiddlewares["GetInteraction"]...)
 	router.PUT(options.BaseURL+"/v1/interactions/:id", wrapper.UpdateInteraction, options.OperationMiddlewares["UpdateInteraction"]...)
-	router.GET(options.BaseURL+"/v1/events/live", wrapper.SubscribeLiveEvents, options.OperationMiddlewares["SubscribeLiveEvents"]...)
+	router.GET(options.BaseURL+"/v1/interactions/stream", wrapper.StreamInteractions, options.OperationMiddlewares["StreamInteractions"]...)
 
-}
-
-type SubscribeLiveEventsRequestObject struct {
-	Params SubscribeLiveEventsParams
-}
-
-type SubscribeLiveEventsResponseObject interface {
-	VisitSubscribeLiveEventsResponse(w http.ResponseWriter) error
-}
-
-type SubscribeLiveEvents200TexteventStreamResponse struct {
-	Body          io.Reader
-	ContentLength int64
-}
-
-func (response SubscribeLiveEvents200TexteventStreamResponse) VisitSubscribeLiveEventsResponse(w http.ResponseWriter) error {
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	if response.ContentLength != 0 {
-		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
-	}
-	w.WriteHeader(200)
-
-	if closer, ok := response.Body.(io.ReadCloser); ok {
-		defer closer.Close()
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		// If w doesn't support flushing, fall back to io.Copy.
-		_, err := io.Copy(w, response.Body)
-		return err
-	}
-	// text/event-stream messages are typically small; use a
-	// modest buffer and flush after each chunk so clients see
-	// events immediately instead of waiting on OS buffering.
-	buf := make([]byte, 4096)
-	for {
-		n, err := response.Body.Read(buf)
-		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				return writeErr
-			}
-			flusher.Flush()
-		}
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-	}
 }
 
 type GetHealthzRequestObject struct {
@@ -497,6 +446,57 @@ func (response CreateInteraction404JSONResponse) VisitCreateInteractionResponse(
 	w.WriteHeader(404)
 	_, err := buf.WriteTo(w)
 	return err
+}
+
+type StreamInteractionsRequestObject struct {
+	Params StreamInteractionsParams
+}
+
+type StreamInteractionsResponseObject interface {
+	VisitStreamInteractionsResponse(w http.ResponseWriter) error
+}
+
+type StreamInteractions200TexteventStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response StreamInteractions200TexteventStreamResponse) VisitStreamInteractionsResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// If w doesn't support flushing, fall back to io.Copy.
+		_, err := io.Copy(w, response.Body)
+		return err
+	}
+	// text/event-stream messages are typically small; use a
+	// modest buffer and flush after each chunk so clients see
+	// events immediately instead of waiting on OS buffering.
+	buf := make([]byte, 4096)
+	for {
+		n, err := response.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 type GetInteractionRequestObject struct {
@@ -637,9 +637,6 @@ func (response GetReadyz503JSONResponse) VisitGetReadyzResponse(w http.ResponseW
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
-	// SubscribeLiveEvents Live event stream
-	// (GET /v1/events/live)
-	SubscribeLiveEvents(ctx context.Context, request SubscribeLiveEventsRequestObject) (SubscribeLiveEventsResponseObject, error)
 	// GetHealthz Liveness probe
 	// (GET /v1/healthz)
 	GetHealthz(ctx context.Context, request GetHealthzRequestObject) (GetHealthzResponseObject, error)
@@ -649,6 +646,9 @@ type StrictServerInterface interface {
 	// CreateInteraction Create an interaction
 	// (POST /v1/interactions)
 	CreateInteraction(ctx context.Context, request CreateInteractionRequestObject) (CreateInteractionResponseObject, error)
+	// StreamInteractions Stream interactions
+	// (GET /v1/interactions/stream)
+	StreamInteractions(ctx context.Context, request StreamInteractionsRequestObject) (StreamInteractionsResponseObject, error)
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx context.Context, request GetInteractionRequestObject) (GetInteractionResponseObject, error)
@@ -670,31 +670,6 @@ func NewStrictHandler(ssi StrictServerInterface, middlewares []StrictMiddlewareF
 type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
-}
-
-// SubscribeLiveEvents operation middleware
-func (sh *strictHandler) SubscribeLiveEvents(ctx echo.Context, params SubscribeLiveEventsParams) error {
-	var request SubscribeLiveEventsRequestObject
-
-	request.Params = params
-
-	handler := func(ctx echo.Context, request interface{}) (interface{}, error) {
-		return sh.ssi.SubscribeLiveEvents(ctx.Request().Context(), request.(SubscribeLiveEventsRequestObject))
-	}
-	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "SubscribeLiveEvents")
-	}
-
-	response, err := handler(ctx, request)
-
-	if err != nil {
-		return err
-	} else if validResponse, ok := response.(SubscribeLiveEventsResponseObject); ok {
-		return validResponse.VisitSubscribeLiveEventsResponse(ctx.Response())
-	} else if response != nil {
-		return fmt.Errorf("unexpected response type: %T", response)
-	}
-	return nil
 }
 
 // GetHealthz operation middleware
@@ -780,6 +755,31 @@ func (sh *strictHandler) CreateInteraction(ctx echo.Context, params CreateIntera
 		return err
 	} else if validResponse, ok := response.(CreateInteractionResponseObject); ok {
 		return validResponse.VisitCreateInteractionResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// StreamInteractions operation middleware
+func (sh *strictHandler) StreamInteractions(ctx echo.Context, params StreamInteractionsParams) error {
+	var request StreamInteractionsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.StreamInteractions(ctx.Request().Context(), request.(StreamInteractionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StreamInteractions")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(StreamInteractionsResponseObject); ok {
+		return validResponse.VisitStreamInteractionsResponse(ctx.Response())
 	} else if response != nil {
 		return fmt.Errorf("unexpected response type: %T", response)
 	}

@@ -64,6 +64,11 @@ test:
 test-verbose:
 	go test -race -v ./...
 
+## test-blackbox: run end-to-end blackbox tests against running service
+test-blackbox:
+	go run ./scripts/blackbox
+
+
 ## fmt: apply formatting via golangci-lint
 fmt:
 	$(GOLANGCI_LINT) fmt

@@ -9,8 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -76,45 +74,17 @@ func main() {
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
 		} else {
-			drainer.New(consumer, repo, cfg).Start(ctx)
+			d := drainer.New(consumer, repo, cfg)
+			go func() {
+				if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					log.Error().Err(err).Msg("micro-batch drainer worker exited with error")
+				}
+			}()
 		}
 	}
 
 	h := handler.New(msgClient, repo)
-
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(middleware.Recover())
-	e.Use(middleware.RequestID())
-	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-		LogMethod:   true,
-		LogURI:      true,
-		LogStatus:   true,
-		LogLatency:  true,
-		LogError:    true,
-		HandleError: true,
-		LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
-			if v.Error != nil {
-				log.Error().
-					Err(v.Error).
-					Str("method", v.Method).
-					Str("uri", v.URI).
-					Int("status", v.Status).
-					Dur("latency", v.Latency).
-					Msg("http request error")
-			} else {
-				log.Info().
-					Str("method", v.Method).
-					Str("uri", v.URI).
-					Int("status", v.Status).
-					Dur("latency", v.Latency).
-					Msg("http request")
-			}
-			return nil
-		},
-	}))
-
-	server.RegisterHandlers(e, h)
+	e := server.New(h)
 
 	go func() {
 		log.Info().Str("addr", cfg.Addr).Msg("starting HTTP server")

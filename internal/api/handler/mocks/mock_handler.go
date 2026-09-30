@@ -71,3 +71,19 @@ func (mr *MockPublisherMockRecorder) PublishInteractionEdited(ctx, evt any) *gom
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PublishInteractionEdited", reflect.TypeOf((*MockPublisher)(nil).PublishInteractionEdited), ctx, evt)
 }
+
+// SubscribeEvents mocks base method.
+func (m *MockPublisher) SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SubscribeEvents", ctx, groupID)
+	ret0, _ := ret[0].(<-chan []byte)
+	ret1, _ := ret[1].(func())
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SubscribeEvents indicates an expected call of SubscribeEvents.
+func (mr *MockPublisherMockRecorder) SubscribeEvents(ctx, groupID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscribeEvents", reflect.TypeOf((*MockPublisher)(nil).SubscribeEvents), ctx, groupID)
+}

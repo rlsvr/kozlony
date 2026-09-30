@@ -208,6 +208,36 @@ func (c *Client) PublishCreateInteractionCmd(ctx context.Context, groupID string
 	return c.Publish(ctx, subject, data)
 }
 
+// SubscribeEvents subscribes to live interaction events for a given group (or all groups if nil)
+// and returns a receive-only channel of raw JSON event payloads and a cleanup function.
+func (c *Client) SubscribeEvents(_ context.Context, groupID *string) (<-chan []byte, func(), error) {
+	if c == nil || c.conn == nil || c.conn.Raw() == nil {
+		return nil, nil, errors.New("nats client not connected")
+	}
+
+	subject := SubjectAllEvents(c.cfg.NATSStreamName)
+	if groupID != nil && *groupID != "" {
+		subject = fmt.Sprintf("%s.%s.evt.>", c.cfg.NATSStreamName, *groupID)
+	}
+
+	msgChan := make(chan []byte, 256)
+	sub, err := c.conn.Raw().Subscribe(subject, func(m *natsio.Msg) {
+		select {
+		case msgChan <- append([]byte(nil), m.Data...):
+		default:
+			log.Warn().Str("subject", m.Subject).Msg("sse event buffer full, dropping message")
+		}
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("subscribe to nats subject %s: %w", subject, err)
+	}
+
+	cleanup := func() {
+		_ = sub.Unsubscribe()
+	}
+	return msgChan, cleanup, nil
+}
+
 // Conn returns the underlying hirnok Conn.
 func (c *Client) Conn() *qpnats.Conn {
 	return c.conn
