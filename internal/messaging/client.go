@@ -109,6 +109,28 @@ func (c *Client) StartPullConsumer(
 	return consumer, nil
 }
 
+// CreateDrainerConsumer creates or updates the durable pull consumer used by the batch drainer.
+func (c *Client) CreateDrainerConsumer(ctx context.Context) (jetstream.Consumer, error) {
+	stream, err := c.Raw().Stream(ctx, c.cfg.NATSStreamName)
+	if err != nil {
+		return nil, fmt.Errorf("get stream: %w", err)
+	}
+
+	consumerCfg := jetstream.ConsumerConfig{
+		Durable:       c.cfg.NATSConsumerName,
+		FilterSubject: SubjectAllEvents(c.cfg.NATSStreamName),
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckWait:       c.cfg.NATSAckWait,
+	}
+
+	cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create or update drainer consumer: %w", err)
+	}
+	return cons, nil
+}
+
 // PublishInteractionCreated publishes an InteractionCreatedEvent with Nats-Msg-Id deduplication.
 func (c *Client) PublishInteractionCreated(ctx context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error) {
 	if evt == nil {

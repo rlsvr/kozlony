@@ -18,6 +18,7 @@ import (
 	"kozlony/internal/api/server"
 	"kozlony/internal/config"
 	"kozlony/internal/database"
+	"kozlony/internal/drainer"
 	"kozlony/internal/messaging"
 )
 
@@ -63,16 +64,10 @@ func main() {
 		repo = database.NewInteractionRepository(dbPool)
 	}
 
-	msgClient, err := messaging.NewClient(cfg)
-	if err != nil {
-		log.Warn().Err(err).Msg("failed to connect to NATS JetStream (continuing without NATS)")
-	} else {
+	msgClient := initMessaging(ctx, cfg)
+	if msgClient != nil {
 		defer msgClient.Close()
-		if err := msgClient.EnsureStream(ctx); err != nil {
-			log.Warn().Err(err).Msg("failed to ensure JetStream stream")
-		} else {
-			log.Info().Str("stream", cfg.NATSStreamName).Msg("ensured NATS JetStream stream")
-		}
+		startDrainerWorker(ctx, msgClient, repo, cfg)
 	}
 
 	h := handler.New(msgClient, repo)
@@ -128,4 +123,35 @@ func main() {
 		log.Fatal().Err(err).Msg("server forced to shutdown")
 	}
 	log.Info().Msg("server exited cleanly")
+}
+
+func initMessaging(ctx context.Context, cfg *config.Config) *messaging.Client {
+	msgClient, err := messaging.NewClient(cfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to connect to NATS JetStream (continuing without NATS)")
+		return nil
+	}
+	if err := msgClient.EnsureStream(ctx); err != nil {
+		log.Warn().Err(err).Msg("failed to ensure JetStream stream")
+	} else {
+		log.Info().Str("stream", cfg.NATSStreamName).Msg("ensured NATS JetStream stream")
+	}
+	return msgClient
+}
+
+func startDrainerWorker(ctx context.Context, msgClient *messaging.Client, repo database.Repository, cfg *config.Config) {
+	if msgClient == nil || repo == nil {
+		return
+	}
+	drainerConsumer, err := msgClient.CreateDrainerConsumer(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
+		return
+	}
+	d := drainer.New(drainerConsumer, repo, cfg)
+	go func() {
+		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error().Err(err).Msg("micro-batch drainer worker exited with error")
+		}
+	}()
 }

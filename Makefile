@@ -14,10 +14,14 @@ ASYNCAPI_CODEGEN_FLAGS := --only-models --struct-name-from-title --resolve-exten
 export
 
 .PHONY: all build run test test-verbose fmt lint lint-fix check clean \
-	openapi-gen asyncapi-gen gen
+	openapi-gen asyncapi-gen gen mocks
 
 ## all: generate + build + test
-all: gen build test
+all: gen mocks build test
+
+## mocks: generate test mocks via uber mockgen
+mocks:
+	go generate ./...
 
 ## gen: generate OpenAPI and AsyncAPI stubs
 gen: openapi-gen asyncapi-gen

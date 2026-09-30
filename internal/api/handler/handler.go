@@ -1,5 +1,6 @@
-// Package handler provides the HTTP handler implementation of the OpenAPI ServerInterface.
 package handler
+
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -source=handler.go -destination=mocks/mock_handler.go -package=mocks
 
 import (
 	"context"
