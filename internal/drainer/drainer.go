@@ -138,6 +138,22 @@ func (d *Drainer) Run(ctx context.Context) error {
 	}
 }
 
+// Start runs the drainer worker in a background goroutine until ctx is canceled.
+func (d *Drainer) Start(ctx context.Context) {
+	go func() {
+		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error().Err(err).Msg("micro-batch drainer worker exited with error")
+		}
+	}()
+}
+
+// Start creates a new Drainer and starts its background processing loop.
+func Start(ctx context.Context, consumer PullConsumer, repo database.Repository, cfg *config.Config) *Drainer {
+	d := New(consumer, repo, cfg)
+	d.Start(ctx)
+	return d
+}
+
 func eventToInteraction(evt *events.InteractionCreatedEvent) (*database.Interaction, error) {
 	parsedID, err := uuid.Parse(evt.ID)
 	if err != nil {

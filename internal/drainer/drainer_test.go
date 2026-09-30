@@ -218,3 +218,35 @@ func TestDrainer_RunShutdown(t *testing.T) {
 		t.Fatalf("expected nil error on canceled run, got: %v", err)
 	}
 }
+
+func TestDrainer_Start(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	d := drainer.New(mockConsumer, mockRepo, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	// Start in background goroutine and ensure it exits cleanly
+	d.Start(ctx)
+}
+
+func TestDrainer_StartHelper(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	d := drainer.Start(ctx, mockConsumer, mockRepo, nil)
+	if d == nil {
+		t.Fatal("expected non-nil drainer from Start helper")
+	}
+}

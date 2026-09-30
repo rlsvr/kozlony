@@ -11,6 +11,7 @@ import (
 	natsio "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	qpnats "github.com/rlsvr/hirnok/pkg/nats"
+	"github.com/rs/zerolog/log"
 
 	"kozlony/internal/config"
 	"kozlony/internal/messaging/commands"
@@ -54,6 +55,28 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		cfg:       cfg,
 		conn:      conn,
 	}, nil
+}
+
+// Init creates a new Client and initializes it against NATS JetStream.
+func Init(ctx context.Context, cfg *config.Config) (*Client, error) {
+	c, err := NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Init(ctx); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// Init initializes client dependencies such as ensuring the configured JetStream stream exists.
+func (c *Client) Init(ctx context.Context) error {
+	if err := c.EnsureStream(ctx); err != nil {
+		return fmt.Errorf("ensure stream: %w", err)
+	}
+	log.Info().Str("stream", c.cfg.NATSStreamName).Msg("ensured NATS JetStream stream")
+	return nil
 }
 
 // EnsureStream idempotently creates or updates the configured JetStream stream with sliding retention.
