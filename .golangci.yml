@@ -46,6 +46,7 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
+    - zerologlint
   settings:
     revive:
       rules:

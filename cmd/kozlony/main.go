@@ -3,71 +3,129 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"kozlony/internal/api/handler"
 	"kozlony/internal/api/server"
 	"kozlony/internal/config"
+	"kozlony/internal/database"
+	"kozlony/internal/messaging"
 )
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := config.Load(ctx)
 	if err != nil {
-		log.Fatalf("failed to load configuration: %v", err)
+		log.Fatal().Err(err).Msg("failed to load configuration")
 	}
+
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+	level, err := zerolog.ParseLevel(cfg.LogLevel)
+	if err != nil {
+		level = zerolog.InfoLevel
+	}
+	if cfg.DebugMode {
+		level = zerolog.DebugLevel
+	}
+	zerolog.SetGlobalLevel(level)
+
+	if cfg.PrettyLogging {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+	}
+
+	log.Info().
+		Str("app", cfg.AppName).
+		Str("addr", cfg.Addr).
+		Str("log_level", level.String()).
+		Msg("initializing services")
+
+	dbPool, err := database.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to connect to PostgreSQL database (continuing without DB)")
+	} else {
+		defer dbPool.Close()
+		log.Info().Msg("connected to PostgreSQL database pool")
+	}
+
+	var repo database.Repository
+	if dbPool != nil {
+		repo = database.NewInteractionRepository(dbPool)
+	}
+
+	msgClient, err := messaging.NewClient(cfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to connect to NATS JetStream (continuing without NATS)")
+	} else {
+		defer msgClient.Close()
+		if err := msgClient.EnsureStream(ctx); err != nil {
+			log.Warn().Err(err).Msg("failed to ensure JetStream stream")
+		} else {
+			log.Info().Str("stream", cfg.NATSStreamName).Msg("ensured NATS JetStream stream")
+		}
+	}
+
+	h := handler.New(msgClient, repo)
 
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(middleware.Recover())
-	if cfg.DebugMode {
-		e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-			LogMethod:   true,
-			LogURI:      true,
-			LogStatus:   true,
-			LogLatency:  true,
-			LogError:    true,
-			HandleError: true,
-			LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
-				if v.Error != nil {
-					log.Printf("[HTTP] %s %s %d %s err=%v", v.Method, v.URI, v.Status, v.Latency, v.Error)
-				} else {
-					log.Printf("[HTTP] %s %s %d %s", v.Method, v.URI, v.Status, v.Latency)
-				}
-				return nil
-			},
-		}))
-	}
+	e.Use(middleware.RequestID())
+	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
+		LogMethod:   true,
+		LogURI:      true,
+		LogStatus:   true,
+		LogLatency:  true,
+		LogError:    true,
+		HandleError: true,
+		LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
+			if v.Error != nil {
+				log.Error().
+					Err(v.Error).
+					Str("method", v.Method).
+					Str("uri", v.URI).
+					Int("status", v.Status).
+					Dur("latency", v.Latency).
+					Msg("http request error")
+			} else {
+				log.Info().
+					Str("method", v.Method).
+					Str("uri", v.URI).
+					Int("status", v.Status).
+					Dur("latency", v.Latency).
+					Msg("http request")
+			}
+			return nil
+		},
+	}))
 
-	h := handler.New()
 	server.RegisterHandlers(e, h)
 
 	go func() {
-		log.Printf("starting %s HTTP server on %s", cfg.AppName, cfg.Addr)
+		log.Info().Str("addr", cfg.Addr).Msg("starting HTTP server")
 		if err := e.Start(cfg.Addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server error: %v", err)
+			log.Fatal().Err(err).Msg("HTTP server encountered fatal error")
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
+	<-ctx.Done()
 
-	log.Println("shutting down server...")
+	log.Info().Msg("shutting down HTTP server...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
 	if err := e.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("server forced to shutdown: %v", err)
+		log.Fatal().Err(err).Msg("server forced to shutdown")
 	}
-	log.Println("server exited cleanly")
+	log.Info().Msg("server exited cleanly")
 }

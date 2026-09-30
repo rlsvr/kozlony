@@ -32,6 +32,12 @@ func TestConfigLoadDefaults(t *testing.T) {
 	if cfg.NATSStreamRetention != 336*time.Hour {
 		t.Errorf("expected NATSStreamRetention 336h, got %v", cfg.NATSStreamRetention)
 	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("expected LogLevel info, got %s", cfg.LogLevel)
+	}
+	if !cfg.PrettyLogging {
+		t.Errorf("expected PrettyLogging true by default, got %v", cfg.PrettyLogging)
+	}
 }
 
 func TestConfigLoadEnvOverride(t *testing.T) {
@@ -40,6 +46,8 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	t.Setenv("DRAIN_FLUSH_INTERVAL", "100ms")
 	t.Setenv("NATS_CONCURRENT_SUBSCRIBERS", "64")
 	t.Setenv("NATS_STREAM_RETENTION", "720h")
+	t.Setenv("LOG_LEVEL", "debug")
+	t.Setenv("PRETTY_LOGGING", "false")
 
 	cfg, err := config.Load(context.Background())
 	if err != nil {
@@ -60,5 +68,11 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.NATSStreamRetention != 720*time.Hour {
 		t.Errorf("expected 720h, got %v", cfg.NATSStreamRetention)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("expected LogLevel debug, got %s", cfg.LogLevel)
+	}
+	if cfg.PrettyLogging {
+		t.Errorf("expected PrettyLogging false, got %v", cfg.PrettyLogging)
 	}
 }

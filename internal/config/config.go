@@ -15,6 +15,8 @@ type Config struct {
 	Addr            string        `env:"ADDR,default=:8080"`
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT,default=10s"`
 	DebugMode       bool          `env:"DEBUG_MODE,default=false"`
+	LogLevel        string        `env:"LOG_LEVEL,default=info"`
+	PrettyLogging   bool          `env:"PRETTY_LOGGING,default=true"`
 
 	// NATS JetStream configuration
 	NATSURL                   string        `env:"NATS_URL,default=nats://localhost:4222"`
