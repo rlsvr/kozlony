@@ -11,6 +11,7 @@ require (
 	github.com/rlsvr/hirnok v0.0.0-20260517145707-feb44812a52d
 	github.com/rs/zerolog v1.35.1
 	github.com/sethvargo/go-envconfig v1.4.3
+	go.uber.org/mock v0.6.0
 )
 
 require (

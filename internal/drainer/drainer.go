@@ -1,0 +1,179 @@
+package drainer
+
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -source=drainer.go -destination=mocks/mock_drainer.go -package=mocks
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/rs/zerolog/log"
+
+	"kozlony/internal/config"
+	"kozlony/internal/database"
+	"kozlony/internal/messaging/events"
+)
+
+// PullConsumer abstracts NATS JetStream pull consumption for micro-batch fetching.
+type PullConsumer interface {
+	Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
+}
+
+// Drainer micro-batches interaction events from NATS JetStream and bulk-inserts them into PostgreSQL.
+type Drainer struct {
+	consumer      PullConsumer
+	repo          database.Repository
+	batchSize     int
+	flushInterval time.Duration
+}
+
+// New creates a new Drainer instance.
+func New(consumer PullConsumer, repo database.Repository, cfg *config.Config) *Drainer {
+	batchSize := 500
+	flushInterval := 50 * time.Millisecond
+	if cfg != nil {
+		if cfg.DrainBatchSize > 0 {
+			batchSize = cfg.DrainBatchSize
+		}
+		if cfg.DrainFlushInterval > 0 {
+			flushInterval = cfg.DrainFlushInterval
+		}
+	}
+
+	return &Drainer{
+		consumer:      consumer,
+		repo:          repo,
+		batchSize:     batchSize,
+		flushInterval: flushInterval,
+	}
+}
+
+// ProcessBatch fetches a single batch of messages up to batchSize within flushInterval,
+// deserializes interaction events, writes them in bulk to PostgreSQL, and acknowledges them.
+func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
+	mb, err := d.consumer.Fetch(d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("fetch batch from jetstream: %w", err)
+	}
+
+	var (
+		rawMsgs      []jetstream.Msg
+		interactions []*database.Interaction
+	)
+
+	for msg := range mb.Messages() {
+		rawMsgs = append(rawMsgs, msg)
+
+		var evt events.InteractionCreatedEvent
+		if err := json.Unmarshal(msg.Data(), &evt); err != nil {
+			log.Warn().Err(err).Str("subject", msg.Subject()).Msg("failed to unmarshal message in drainer")
+			continue
+		}
+
+		item, err := eventToInteraction(&evt)
+		if err != nil {
+			log.Warn().Err(err).Str("id", evt.ID).Msg("invalid event payload in drainer")
+			continue
+		}
+
+		interactions = append(interactions, item)
+	}
+
+	if mb.Error() != nil && !errors.Is(mb.Error(), context.DeadlineExceeded) {
+		log.Warn().Err(mb.Error()).Msg("message batch fetch error")
+	}
+
+	if len(interactions) == 0 {
+		for _, m := range rawMsgs {
+			_ = m.Ack()
+		}
+		return 0, nil
+	}
+
+	if err := d.repo.InsertBatch(ctx, interactions); err != nil {
+		log.Error().Err(err).Int("batch_size", len(interactions)).Msg("failed to insert batch into postgres, naking messages")
+		for _, m := range rawMsgs {
+			_ = m.Nak()
+		}
+		return 0, fmt.Errorf("insert batch: %w", err)
+	}
+
+	for _, m := range rawMsgs {
+		_ = m.Ack()
+	}
+
+	log.Debug().Int("count", len(interactions)).Msg("successfully drained micro-batch to postgres")
+	return len(interactions), nil
+}
+
+// Run continuously processes micro-batches until ctx is canceled.
+func (d *Drainer) Run(ctx context.Context) error {
+	log.Info().
+		Int("batch_size", d.batchSize).
+		Dur("flush_interval", d.flushInterval).
+		Msg("starting JetStream micro-batch drainer worker")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("stopping micro-batch drainer worker")
+			return nil
+		default:
+			if _, err := d.ProcessBatch(ctx); err != nil {
+				log.Error().Err(err).Msg("error processing micro-batch")
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+		}
+	}
+}
+
+func eventToInteraction(evt *events.InteractionCreatedEvent) (*database.Interaction, error) {
+	parsedID, err := uuid.Parse(evt.ID)
+	if err != nil {
+		return nil, fmt.Errorf("parse interaction id: %w", err)
+	}
+
+	var rootID *uuid.UUID
+	if evt.RootID != nil && *evt.RootID != "" {
+		if pRoot, err := uuid.Parse(*evt.RootID); err == nil {
+			rootID = &pRoot
+		}
+	}
+
+	var parentID *uuid.UUID
+	if evt.ParentID != nil && *evt.ParentID != "" {
+		if pParent, err := uuid.Parse(*evt.ParentID); err == nil {
+			parentID = &pParent
+		}
+	}
+
+	version := evt.Version
+	if version <= 0 {
+		version = 1
+	}
+
+	return &database.Interaction{
+		ID:         parsedID,
+		GroupID:    evt.GroupID,
+		RootID:     rootID,
+		ParentID:   parentID,
+		Title:      evt.Title,
+		Body:       evt.Body,
+		Author:     evt.Author,
+		CreatedAt:  evt.CreatedAt,
+		ReplyCount: evt.ReplyCount,
+		Depth:      evt.Depth,
+		Version:    version,
+	}, nil
+}

@@ -1,5 +1,6 @@
-// Package database provides PostgreSQL persistence and connection management.
 package database
+
+//go:generate go run go.uber.org/mock/mockgen@v0.6.0 -source=postgres.go -destination=mocks/mock_postgres.go -package=mocks
 
 import (
 	"context"
