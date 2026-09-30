@@ -20,8 +20,3 @@ tmp/
 .idea/
 .vscode/
 .DS_Store
-
-# Specs & Plans
-PLAN*.md
-task.pdf
-
