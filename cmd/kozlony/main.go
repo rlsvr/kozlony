@@ -14,6 +14,7 @@ import (
 
 	"github.com/rlsvr/kozlony/internal/api/handler"
 	"github.com/rlsvr/kozlony/internal/api/server"
+	"github.com/rlsvr/kozlony/internal/cache"
 	"github.com/rlsvr/kozlony/internal/config"
 	"github.com/rlsvr/kozlony/internal/database"
 	"github.com/rlsvr/kozlony/internal/drainer"
@@ -83,7 +84,8 @@ func main() {
 		}
 	}
 
-	h := handler.New(msgClient, repo)
+	interactionCache := cache.NewMemoryCache(cfg)
+	h := handler.New(msgClient, repo, interactionCache)
 	e := server.New(h)
 
 	go func() {

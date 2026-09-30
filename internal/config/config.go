@@ -30,7 +30,8 @@ type Config struct {
 	DatabaseURL string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"`
 
 	// In-memory hot cache configuration
-	MaxCachedInteractions int `env:"MAX_CACHED_INTERACTIONS,default=500000"`
+	MaxCachedInteractions int           `env:"MAX_CACHED_INTERACTIONS,default=500000"`
+	CacheTTL              time.Duration `env:"CACHE_TTL,default=1h"`
 
 	// Micro-batch drainer configuration
 	DrainBatchSize     int           `env:"DRAIN_BATCH_SIZE,default=500"`
