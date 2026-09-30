@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: kozlony-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: messageboard
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d messageboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kozlony_net
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: kozlony-nats
+    command: ["-js", "-m", "8222", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks:
+      - kozlony_net
+
+volumes:
+  pgdata:
+  natsdata:
+
+networks:
+  kozlony_net:
+    name: kozlony_net
