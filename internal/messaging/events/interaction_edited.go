@@ -20,6 +20,9 @@ type InteractionEditedEvent struct {
 
 	// Timestamp when edited.
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Incremented interaction version number.
+	Version int `json:"version"`
 }
 
 // Updated title (for root posts).

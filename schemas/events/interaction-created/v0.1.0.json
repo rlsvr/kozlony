@@ -12,7 +12,8 @@
     "author",
     "created_at",
     "reply_count",
-    "depth"
+    "depth",
+    "version"
   ],
   "properties": {
     "id": {
@@ -22,6 +23,7 @@
     },
     "group_id": {
       "type": "string",
+      "maxLength": 64,
       "description": "Board or group identifier."
     },
     "root_id": {
@@ -36,14 +38,17 @@
     },
     "title": {
       "type": ["string", "null"],
+      "maxLength": 255,
       "description": "Post title, null for replies."
     },
     "body": {
       "type": "string",
+      "maxLength": 65535,
       "description": "Markdown content."
     },
     "author": {
       "type": "string",
+      "maxLength": 100,
       "description": "Author display name."
     },
     "created_at": {
@@ -58,6 +63,12 @@
     "depth": {
       "type": "integer",
       "description": "Tree depth (0 for root)."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Interaction version number (starts at 1)."
     }
   }
 }

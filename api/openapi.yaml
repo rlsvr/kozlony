@@ -52,6 +52,13 @@ paths:
       operationId: CreateInteraction
       tags:
         - Interactions
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: Client-provided idempotency key for safe retries.
+          required: false
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -145,6 +152,52 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+    put:
+      summary: Edit an interaction
+      description: Updates the title (optional, root posts only) and body of an interaction with optimistic concurrency version check.
+      operationId: UpdateInteraction
+      tags:
+        - Interactions
+      parameters:
+        - name: id
+          in: path
+          description: Interaction UUID.
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateInteractionRequest"
+      responses:
+        "200":
+          description: Interaction updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          description: Invalid input or missing fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Interaction not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Version conflict (interaction was modified by another client).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/events/live:
     get:
       summary: Live event stream
@@ -196,6 +249,7 @@ components:
         group_id:
           type: string
           default: "root"
+          maxLength: 64
           description: Board/Group identifier.
         parent_id:
           type: string
@@ -205,13 +259,41 @@ components:
         title:
           type: string
           nullable: true
+          minLength: 1
+          maxLength: 255
           description: Title for root posts; omitted or null for replies.
         body:
           type: string
+          minLength: 1
+          maxLength: 65535
           description: Markdown/text content of the post or reply.
         author:
           type: string
+          minLength: 1
+          maxLength: 100
           description: Username or display name of the author.
+
+    UpdateInteractionRequest:
+      type: object
+      required:
+        - body
+        - version
+      properties:
+        title:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 255
+          description: Updated title for root posts; null or omitted for replies.
+        body:
+          type: string
+          minLength: 1
+          maxLength: 65535
+          description: Updated markdown/text content.
+        version:
+          type: integer
+          minimum: 1
+          description: Current version for optimistic concurrency control.
 
     Interaction:
       type: object
@@ -223,6 +305,7 @@ components:
         - created_at
         - reply_count
         - depth
+        - version
       properties:
         id:
           type: string
@@ -230,6 +313,7 @@ components:
           description: Time-ordered UUIDv7 identifier.
         group_id:
           type: string
+          maxLength: 64
           example: "root"
         root_id:
           type: string
@@ -244,12 +328,15 @@ components:
         title:
           type: string
           nullable: true
+          maxLength: 255
           example: "Welcome to the Message Board"
         body:
           type: string
+          maxLength: 65535
           example: "This is the body content."
         author:
           type: string
+          maxLength: 100
           example: "Alice"
         created_at:
           type: string
@@ -265,6 +352,12 @@ components:
           type: integer
           default: 0
           description: Nesting depth (0 = root post, 1 = direct reply, 2+ = nested).
+        version:
+          type: integer
+          minimum: 1
+          default: 1
+          example: 1
+          description: Version number for optimistic concurrency control.
 
     InteractionFeedResponse:
       type: object

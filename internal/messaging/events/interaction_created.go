@@ -35,6 +35,9 @@ type InteractionCreatedEvent struct {
 
 	// Post title, null for replies.
 	Title InteractionCreatedEventTitle `json:"title,omitempty"`
+
+	// Interaction version number (starts at 1).
+	Version int `json:"version"`
 }
 
 // Pointer to the immediate parent interaction.

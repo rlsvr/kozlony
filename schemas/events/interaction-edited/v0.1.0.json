@@ -9,6 +9,7 @@
     "id",
     "group_id",
     "body",
+    "version",
     "updated_at"
   ],
   "properties": {
@@ -19,15 +20,23 @@
     },
     "group_id": {
       "type": "string",
+      "maxLength": 64,
       "description": "Board or group identifier."
     },
     "title": {
       "type": ["string", "null"],
+      "maxLength": 255,
       "description": "Updated title (for root posts)."
     },
     "body": {
       "type": "string",
+      "maxLength": 65535,
       "description": "Updated body content."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "Incremented interaction version number."
     },
     "updated_at": {
       "type": "string",

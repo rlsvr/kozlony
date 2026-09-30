@@ -75,6 +75,11 @@ type Interaction struct {
 	// Title Example: Welcome to the Message Board
 	Title     *string    `json:"title,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
+	// Version Version number for optimistic concurrency control.
+	//
+	// Example: 1
+	Version int `json:"version"`
 }
 
 // InteractionDetail defines model for InteractionDetail.
@@ -89,6 +94,18 @@ type InteractionFeedResponse struct {
 
 	// NextCursor Cursor to pass as cursor query param for subsequent page.
 	NextCursor *time.Time `json:"next_cursor,omitempty"`
+}
+
+// UpdateInteractionRequest defines model for UpdateInteractionRequest.
+type UpdateInteractionRequest struct {
+	// Body Updated markdown/text content.
+	Body string `json:"body"`
+
+	// Title Updated title for root posts; null or omitted for replies.
+	Title *string `json:"title,omitempty"`
+
+	// Version Current version for optimistic concurrency control.
+	Version int `json:"version"`
 }
 
 // SubscribeLiveEventsParams defines parameters for SubscribeLiveEvents.
@@ -109,8 +126,17 @@ type ListInteractionsParams struct {
 	Cursor *time.Time `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
+// CreateInteractionParams defines parameters for CreateInteraction.
+type CreateInteractionParams struct {
+	// IdempotencyKey Client-provided idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // CreateInteractionJSONRequestBody defines body for CreateInteraction for application/json ContentType.
 type CreateInteractionJSONRequestBody = CreateInteractionRequest
+
+// UpdateInteractionJSONRequestBody defines body for UpdateInteraction for application/json ContentType.
+type UpdateInteractionJSONRequestBody = UpdateInteractionRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -125,10 +151,13 @@ type ServerInterface interface {
 	ListInteractions(ctx echo.Context, params ListInteractionsParams) error
 	// CreateInteraction Create an interaction
 	// (POST /v1/interactions)
-	CreateInteraction(ctx echo.Context) error
+	CreateInteraction(ctx echo.Context, params CreateInteractionParams) error
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx echo.Context, id openapi_types.UUID) error
+	// UpdateInteraction Edit an interaction
+	// (PUT /v1/interactions/{id})
+	UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error
 	// GetReadyz Readiness probe
 	// (GET /v1/readyz)
 	GetReadyz(ctx echo.Context) error
@@ -202,8 +231,28 @@ func (w *ServerInterfaceWrapper) ListInteractions(ctx echo.Context) error {
 func (w *ServerInterfaceWrapper) CreateInteraction(ctx echo.Context) error {
 	var err error
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateInteractionParams
+
+	headers := ctx.Request().Header
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Expected one value for Idempotency-Key, got %d", n))
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter Idempotency-Key: %s", err))
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+	}
+
 	// Invoke the callback with all the unmarshaled arguments
-	err = w.Handler.CreateInteraction(ctx)
+	err = w.Handler.CreateInteraction(ctx, params)
 	return err
 }
 
@@ -220,6 +269,22 @@ func (w *ServerInterfaceWrapper) GetInteraction(ctx echo.Context) error {
 
 	// Invoke the callback with all the unmarshaled arguments
 	err = w.Handler.GetInteraction(ctx, id)
+	return err
+}
+
+// UpdateInteraction converts echo context to params.
+func (w *ServerInterfaceWrapper) UpdateInteraction(ctx echo.Context) error {
+	var err error
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", ctx.Param("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: ctx.Request().URL.RawPath == ""})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
+	}
+
+	// Invoke the callback with all the unmarshaled arguments
+	err = w.Handler.UpdateInteraction(ctx, id)
 	return err
 }
 
@@ -284,6 +349,7 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	router.GET(options.BaseURL+"/v1/interactions", wrapper.ListInteractions, options.OperationMiddlewares["ListInteractions"]...)
 	router.POST(options.BaseURL+"/v1/interactions", wrapper.CreateInteraction, options.OperationMiddlewares["CreateInteraction"]...)
 	router.GET(options.BaseURL+"/v1/interactions/:id", wrapper.GetInteraction, options.OperationMiddlewares["GetInteraction"]...)
+	router.PUT(options.BaseURL+"/v1/interactions/:id", wrapper.UpdateInteraction, options.OperationMiddlewares["UpdateInteraction"]...)
 	router.GET(options.BaseURL+"/v1/events/live", wrapper.SubscribeLiveEvents, options.OperationMiddlewares["SubscribeLiveEvents"]...)
 
 }
@@ -383,7 +449,8 @@ func (response ListInteractions200JSONResponse) VisitListInteractionsResponse(w 
 }
 
 type CreateInteractionRequestObject struct {
-	Body *CreateInteractionJSONRequestBody
+	Params CreateInteractionParams
+	Body   *CreateInteractionJSONRequestBody
 }
 
 type CreateInteractionResponseObject interface {
@@ -468,6 +535,71 @@ func (response GetInteraction404JSONResponse) VisitGetInteractionResponse(w http
 	return err
 }
 
+type UpdateInteractionRequestObject struct {
+	Id   openapi_types.UUID `json:"id"`
+	Body *UpdateInteractionJSONRequestBody
+}
+
+type UpdateInteractionResponseObject interface {
+	VisitUpdateInteractionResponse(w http.ResponseWriter) error
+}
+
+type UpdateInteraction200JSONResponse Interaction
+
+func (response UpdateInteraction200JSONResponse) VisitUpdateInteractionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateInteraction400JSONResponse ErrorResponse
+
+func (response UpdateInteraction400JSONResponse) VisitUpdateInteractionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateInteraction404JSONResponse ErrorResponse
+
+func (response UpdateInteraction404JSONResponse) VisitUpdateInteractionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateInteraction409JSONResponse ErrorResponse
+
+func (response UpdateInteraction409JSONResponse) VisitUpdateInteractionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetReadyzRequestObject struct {
 }
 
@@ -520,6 +652,9 @@ type StrictServerInterface interface {
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx context.Context, request GetInteractionRequestObject) (GetInteractionResponseObject, error)
+	// UpdateInteraction Edit an interaction
+	// (PUT /v1/interactions/{id})
+	UpdateInteraction(ctx context.Context, request UpdateInteractionRequestObject) (UpdateInteractionResponseObject, error)
 	// GetReadyz Readiness probe
 	// (GET /v1/readyz)
 	GetReadyz(ctx context.Context, request GetReadyzRequestObject) (GetReadyzResponseObject, error)
@@ -611,8 +746,10 @@ func (sh *strictHandler) ListInteractions(ctx echo.Context, params ListInteracti
 }
 
 // CreateInteraction operation middleware
-func (sh *strictHandler) CreateInteraction(ctx echo.Context) error {
+func (sh *strictHandler) CreateInteraction(ctx echo.Context, params CreateInteractionParams) error {
 	var request CreateInteractionRequestObject
+
+	request.Params = params
 
 	var body CreateInteractionJSONRequestBody
 	var err error
@@ -668,6 +805,47 @@ func (sh *strictHandler) GetInteraction(ctx echo.Context, id openapi_types.UUID)
 		return err
 	} else if validResponse, ok := response.(GetInteractionResponseObject); ok {
 		return validResponse.VisitGetInteractionResponse(ctx.Response())
+	} else if response != nil {
+		return fmt.Errorf("unexpected response type: %T", response)
+	}
+	return nil
+}
+
+// UpdateInteraction operation middleware
+func (sh *strictHandler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error {
+	var request UpdateInteractionRequestObject
+
+	request.Id = id
+
+	var body UpdateInteractionJSONRequestBody
+	var err error
+	if binder, ok := ctx.Echo().Binder.(*echo.DefaultBinder); ok {
+		// Bind only the request body, so that path and query parameters
+		// are not also bound into the body struct.
+		err = binder.BindBody(ctx, &body)
+	} else {
+		// A custom binder is installed on the Echo instance; defer to it
+		// entirely, since echo.Binder does not expose body-only binding.
+		err = ctx.Bind(&body)
+	}
+	if err != nil {
+		return err
+	}
+	request.Body = &body
+
+	handler := func(ctx echo.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateInteraction(ctx.Request().Context(), request.(UpdateInteractionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateInteraction")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		return err
+	} else if validResponse, ok := response.(UpdateInteractionResponseObject); ok {
+		return validResponse.VisitUpdateInteractionResponse(ctx.Response())
 	} else if response != nil {
 		return fmt.Errorf("unexpected response type: %T", response)
 	}
