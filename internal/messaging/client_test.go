@@ -140,17 +140,23 @@ func TestCommandSerialization(t *testing.T) {
 func TestPublishNilArguments(t *testing.T) {
 	// Dummy client with nil connection to verify validation before network calls
 	client := &messaging.Client{}
+	pub := messaging.NewPublisher(client)
 
-	if _, err := client.PublishInteractionCreated(context.Background(), nil); err == nil {
+	if _, err := pub.PublishInteractionCreated(context.Background(), nil); err == nil {
 		t.Error("expected error publishing nil InteractionCreatedEvent")
 	}
 
-	if _, err := client.PublishInteractionEdited(context.Background(), nil); err == nil {
+	if _, err := pub.PublishInteractionEdited(context.Background(), nil); err == nil {
 		t.Error("expected error publishing nil InteractionEditedEvent")
 	}
 
-	if _, err := client.PublishCreateInteractionCmd(context.Background(), "dev", nil); err == nil {
+	if _, err := pub.PublishCreateInteractionCmd(context.Background(), "dev", nil); err == nil {
 		t.Error("expected error publishing nil CreateInteractionCommand")
+	}
+
+	// DrainerConsumer nil client validation
+	if _, err := messaging.NewDrainerConsumer(context.Background(), nil); err == nil {
+		t.Error("expected error creating DrainerConsumer with nil client")
 	}
 }
 

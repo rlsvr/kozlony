@@ -118,22 +118,26 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 		groupID = *req.GroupId
 	}
 
-	idempotencyKey := ""
-	if params.IdempotencyKey != nil && *params.IdempotencyKey != "" {
-		idempotencyKey = *params.IdempotencyKey
-	} else if hKey := ctx.Request().Header.Get("Idempotency-Key"); hKey != "" {
-		idempotencyKey = hKey
+	idempotencyKey := strings.TrimSpace(params.IdempotencyKey)
+
+	// The generated wrapper already rejects a missing header with 400; this guards
+	// direct handler invocation and an all-whitespace key.
+	if idempotencyKey == "" {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
+			Error: "Idempotency-Key header is required",
+		})
 	}
 
-	newID, err := resolveInteractionID(idempotencyKey)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to generate UUIDv7")
-		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to generate interaction ID"})
-	}
+	newID := resolveInteractionID(idempotencyKey)
 
-	if idempotencyKey != "" && h.repo != nil {
-		existing, err := h.repo.GetByID(ctx.Request().Context(), newID)
-		if err == nil && existing != nil {
+	// Dedup: check hot cache first (covers the drainer flush window), then fall back to DB.
+	if h.cache != nil {
+		if cached, cacheErr := h.cache.Get(ctx.Request().Context(), newID); cacheErr == nil && cached != nil {
+			return ctx.JSON(http.StatusOK, toAPIInteraction(cached))
+		}
+	}
+	if h.repo != nil {
+		if existing, dbErr := h.repo.GetByID(ctx.Request().Context(), newID); dbErr == nil && existing != nil {
 			return ctx.JSON(http.StatusOK, toAPIInteraction(existing))
 		}
 	}
@@ -238,6 +242,14 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 	if req.Title != nil && len(*req.Title) > maxTitleLength {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
 	}
+
+	// An omitted or blank title means "leave the title unchanged". The repository
+	// uses COALESCE to preserve it, so a body-only edit cannot wipe a root post's title.
+	title := req.Title
+	if title != nil && strings.TrimSpace(*title) == "" {
+		title = nil
+	}
+
 	if req.Version < 1 {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "version must be a positive integer"})
 	}
@@ -246,7 +258,7 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
 	}
 
-	updated, err := h.repo.Update(ctx.Request().Context(), id, req.Version, req.Title, req.Body)
+	updated, err := h.repo.Update(ctx.Request().Context(), id, req.Version, title, req.Body)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
@@ -305,6 +317,13 @@ func (h *Handler) ListInteractions(ctx echo.Context, params server.ListInteracti
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list feed from database")
 		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to load interactions"})
+	}
+
+	if h.cache != nil {
+		reqCtx := ctx.Request().Context()
+		for _, item := range items {
+			_ = h.cache.Set(reqCtx, item)
+		}
 	}
 
 	interactions := make([]server.Interaction, len(items))
@@ -468,14 +487,15 @@ func toAPIInteraction(item *database.Interaction) server.Interaction {
 	return res
 }
 
-func resolveInteractionID(idempotencyKey string) (uuid.UUID, error) {
-	if idempotencyKey == "" {
-		return uuid.NewV7()
-	}
+// resolveInteractionID derives a deterministic UUID from the client-provided idempotency key.
+// If the key is itself a valid UUID it is used directly; otherwise a UUID v5 (SHA-1) is
+// generated from the key so that retries with the same key always map to the same ID.
+// It cannot fail, so it returns no error.
+func resolveInteractionID(idempotencyKey string) uuid.UUID {
 	if parsed, err := uuid.Parse(idempotencyKey); err == nil {
-		return parsed, nil
+		return parsed
 	}
-	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey)), nil
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey))
 }
 
 func parentDepthAndRoot(parent *database.Interaction) (int, *string) {

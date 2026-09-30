@@ -70,22 +70,24 @@ func main() {
 		defer msgClient.Close()
 	}
 
+	var pub handler.Publisher
+	if msgClient != nil {
+		pub = messaging.NewPublisher(msgClient)
+	}
+
 	if msgClient != nil && repo != nil {
-		consumer, err := msgClient.CreateDrainerConsumer(ctx)
+		drainerConsumer, err := messaging.NewDrainerConsumer(ctx, msgClient)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
 		} else {
-			d := drainer.New(consumer, repo, msgClient, cfg)
-			go func() {
-				if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					log.Error().Err(err).Msg("micro-batch drainer worker exited with error")
-				}
-			}()
+			// drainer.Start constructs the Drainer and launches its worker loop in a
+			// background goroutine; do not also call Run here or the loop runs twice.
+			drainer.Start(ctx, drainerConsumer, repo, msgClient, cfg)
 		}
 	}
 
 	interactionCache := cache.NewMemoryCache(cfg)
-	h := handler.New(msgClient, repo, interactionCache)
+	h := handler.New(pub, repo, interactionCache)
 	e := server.New(h)
 
 	go func() {
