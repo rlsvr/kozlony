@@ -13,6 +13,7 @@
     "group_id": {
       "type": "string",
       "default": "root",
+      "maxLength": 64,
       "description": "Board or group identifier."
     },
     "parent_id": {
@@ -22,14 +23,20 @@
     },
     "title": {
       "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 255,
       "description": "Title for root posts."
     },
     "body": {
       "type": "string",
+      "minLength": 1,
+      "maxLength": 65535,
       "description": "Body content."
     },
     "author": {
       "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
       "description": "Author name."
     }
   }
