@@ -1,4 +1,4 @@
-module kozlony
+module github.com/rlsvr/kozlony
 
 go 1.26.1
 

@@ -15,10 +15,10 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"kozlony/internal/api/handler"
-	"kozlony/internal/api/server"
-	"kozlony/internal/database"
-	"kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/api/handler"
+	"github.com/rlsvr/kozlony/internal/api/server"
+	"github.com/rlsvr/kozlony/internal/database"
+	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
 const (

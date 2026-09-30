@@ -11,10 +11,10 @@ package mocks
 
 import (
 	context "context"
-	events "kozlony/internal/messaging/events"
 	reflect "reflect"
 
 	jetstream "github.com/nats-io/nats.go/jetstream"
+	events "github.com/rlsvr/kozlony/internal/messaging/events"
 	gomock "go.uber.org/mock/gomock"
 )
 

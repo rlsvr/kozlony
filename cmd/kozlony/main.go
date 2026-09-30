@@ -12,12 +12,12 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"kozlony/internal/api/handler"
-	"kozlony/internal/api/server"
-	"kozlony/internal/config"
-	"kozlony/internal/database"
-	"kozlony/internal/drainer"
-	"kozlony/internal/messaging"
+	"github.com/rlsvr/kozlony/internal/api/handler"
+	"github.com/rlsvr/kozlony/internal/api/server"
+	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/database"
+	"github.com/rlsvr/kozlony/internal/drainer"
+	"github.com/rlsvr/kozlony/internal/messaging"
 )
 
 func main() {

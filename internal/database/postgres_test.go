@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"kozlony/internal/database"
+	"github.com/rlsvr/kozlony/internal/database"
 )
 
 func TestConnectInvalidURL(t *testing.T) {
