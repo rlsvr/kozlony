@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/rlsvr/kozlony/internal/api/server"
+	"github.com/rlsvr/kozlony/internal/cache"
 	"github.com/rlsvr/kozlony/internal/database"
 	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
@@ -39,24 +39,19 @@ type Publisher interface {
 	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
 }
 
-type cachedInteraction struct {
-	ID     uuid.UUID
-	RootID *uuid.UUID
-	Depth  int
-}
-
 // Handler implements server.ServerInterface.
 type Handler struct {
-	publisher          Publisher
-	repo               database.Repository
-	recentInteractions sync.Map
+	publisher Publisher
+	repo      database.Repository
+	cache     cache.InteractionCache
 }
 
-// New creates a new Handler instance with publisher and database repository dependencies.
-func New(pub Publisher, repo database.Repository) *Handler {
+// New creates a new Handler instance with publisher, database repository, and cache dependencies.
+func New(pub Publisher, repo database.Repository, cacheLayer cache.InteractionCache) *Handler {
 	return &Handler{
 		publisher: pub,
 		repo:      repo,
+		cache:     cacheLayer,
 	}
 }
 
@@ -195,11 +190,23 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 			rUUID = &parsed
 		}
 	}
-	h.recentInteractions.Store(newID, cachedInteraction{
-		ID:     newID,
-		RootID: rUUID,
-		Depth:  depth,
-	})
+
+	interactionModel := &database.Interaction{
+		ID:         newID,
+		GroupID:    groupID,
+		RootID:     rUUID,
+		ParentID:   req.ParentId,
+		Title:      req.Title,
+		Body:       req.Body,
+		Author:     req.Author,
+		CreatedAt:  now,
+		ReplyCount: 0,
+		Depth:      depth,
+		Version:    1,
+	}
+	if h.cache != nil {
+		_ = h.cache.Set(ctx.Request().Context(), interactionModel)
+	}
 
 	resp := server.Interaction{
 		Id:         newID,
@@ -211,6 +218,7 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 		ReplyCount: 0,
 		Depth:      depth,
 		ParentId:   req.ParentId,
+		RootId:     rUUID,
 		Version:    1,
 	}
 
@@ -248,6 +256,10 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		}
 		log.Error().Err(err).Str("id", id.String()).Msg("failed to update interaction")
 		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to update interaction"})
+	}
+
+	if h.cache != nil {
+		_ = h.cache.Set(ctx.Request().Context(), updated)
 	}
 
 	if h.publisher != nil {
@@ -313,32 +325,79 @@ func (h *Handler) ListInteractions(ctx echo.Context, params server.ListInteracti
 
 // GetInteraction handles fetching a post along with its replies.
 func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error {
+	reqCtx := ctx.Request().Context()
 	if h.repo == nil {
 		return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
 	}
 
-	thread, err := h.repo.GetThread(ctx.Request().Context(), id)
-	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
+	// 1. Look up the requested interaction (checking cache then repository)
+	var target *database.Interaction
+	if h.cache != nil {
+		if cached, err := h.cache.Get(reqCtx, id); err == nil && cached != nil {
+			target = cached
 		}
-		log.Error().Err(err).Str("id", id.String()).Msg("failed to get thread from database")
+	}
+	if target == nil {
+		item, err := h.repo.GetByID(reqCtx, id)
+		if err != nil {
+			if errors.Is(err, database.ErrNotFound) {
+				return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
+			}
+			log.Error().Err(err).Str("id", id.String()).Msg("failed to get interaction from database")
+			return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to load interaction"})
+		}
+		target = item
+		if h.cache != nil {
+			_ = h.cache.Set(reqCtx, target)
+		}
+	}
+
+	// 2. Hierarchical navigation: resolve the conversation root
+	rootID := target.ID
+	if target.RootID != nil {
+		rootID = *target.RootID
+	}
+
+	thread, err := h.repo.GetThread(reqCtx, rootID)
+	if err != nil {
+		log.Error().Err(err).Str("root_id", rootID.String()).Msg("failed to load thread")
 		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to load thread"})
 	}
 
-	if len(thread) == 0 {
-		return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
+	// Warm cache with thread items for rapid navigation
+	if h.cache != nil {
+		for _, item := range thread {
+			_ = h.cache.Set(reqCtx, item)
+		}
 	}
 
-	root := toAPIInteraction(thread[0])
-	replies := make([]server.Interaction, 0, len(thread)-1)
-	for _, item := range thread[1:] {
-		replies = append(replies, toAPIInteraction(item))
+	// If root post was requested, return root + all thread replies
+	if target.ID == rootID && len(thread) > 0 {
+		root := toAPIInteraction(thread[0])
+		replies := make([]server.Interaction, 0, len(thread)-1)
+		for _, item := range thread[1:] {
+			replies = append(replies, toAPIInteraction(item))
+		}
+		return ctx.JSON(http.StatusOK, server.InteractionDetail{
+			Interaction: root,
+			Replies:     replies,
+		})
+	}
+
+	// If a nested reply was requested, return that reply with its subtree of replies
+	var directReplies []server.Interaction
+	for _, item := range thread {
+		if item.ParentID != nil && *item.ParentID == target.ID {
+			directReplies = append(directReplies, toAPIInteraction(item))
+		}
+	}
+	if directReplies == nil {
+		directReplies = []server.Interaction{}
 	}
 
 	return ctx.JSON(http.StatusOK, server.InteractionDetail{
-		Interaction: root,
-		Replies:     replies,
+		Interaction: toAPIInteraction(target),
+		Replies:     directReplies,
 	})
 }
 
@@ -419,21 +478,28 @@ func resolveInteractionID(idempotencyKey string) (uuid.UUID, error) {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey)), nil
 }
 
+func parentDepthAndRoot(parent *database.Interaction) (int, *string) {
+	depth := parent.Depth + 1
+	if parent.RootID != nil {
+		rStr := parent.RootID.String()
+		return depth, &rStr
+	}
+	rStr := parent.ID.String()
+	return depth, &rStr
+}
+
 func (h *Handler) resolveParentHierarchy(ctx context.Context, parentID uuid.UUID) (int, *string, error) {
-	if val, ok := h.recentInteractions.Load(parentID); ok {
-		cached := val.(cachedInteraction)
-		depth := cached.Depth + 1
-		if cached.RootID != nil {
-			rStr := cached.RootID.String()
-			return depth, &rStr, nil
+	// 1. Check in-memory cache first (hot read shield & immediate resolution for new posts)
+	if h.cache != nil {
+		if cached, err := h.cache.Get(ctx, parentID); err == nil && cached != nil {
+			d, r := parentDepthAndRoot(cached)
+			return d, r, nil
 		}
-		rStr := cached.ID.String()
-		return depth, &rStr, nil
 	}
 
+	// 2. Fall back to PostgreSQL database
 	if h.repo == nil {
-		pStr := parentID.String()
-		return 1, &pStr, nil
+		return 0, nil, database.ErrNotFound
 	}
 
 	parent, err := h.repo.GetByID(ctx, parentID)
@@ -441,12 +507,10 @@ func (h *Handler) resolveParentHierarchy(ctx context.Context, parentID uuid.UUID
 		return 0, nil, err
 	}
 
-	depth := parent.Depth + 1
-	if parent.RootID != nil {
-		rStr := parent.RootID.String()
-		return depth, &rStr, nil
+	if h.cache != nil {
+		_ = h.cache.Set(ctx, parent)
 	}
 
-	rStr := parent.ID.String()
-	return depth, &rStr, nil
+	d, r := parentDepthAndRoot(parent)
+	return d, r, nil
 }

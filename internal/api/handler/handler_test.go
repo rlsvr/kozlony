@@ -17,6 +17,8 @@ import (
 
 	"github.com/rlsvr/kozlony/internal/api/handler"
 	"github.com/rlsvr/kozlony/internal/api/server"
+	"github.com/rlsvr/kozlony/internal/cache"
+	"github.com/rlsvr/kozlony/internal/config"
 	"github.com/rlsvr/kozlony/internal/database"
 	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
@@ -82,7 +84,11 @@ func (m *mockRepository) Update(_ context.Context, id uuid.UUID, expectedVersion
 	if item.Version != expectedVersion {
 		return nil, database.ErrVersionConflict
 	}
-	item.Title = title
+	// Mirrors the COALESCE($3, title) behaviour of the real repository: an omitted
+	// title leaves the stored title untouched.
+	if title != nil {
+		item.Title = title
+	}
 	item.Body = body
 	item.Version++
 	now := time.Now().UTC()
@@ -122,7 +128,7 @@ func TestHealthEndpoints(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(pub, repo)
+	h := handler.New(pub, repo, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -158,7 +164,7 @@ func TestHealthEndpoints(t *testing.T) {
 func TestCreateInteraction(t *testing.T) {
 	e := echo.New()
 	mockPub := &mockPublisher{}
-	h := handler.New(mockPub, nil)
+	h := handler.New(mockPub, nil, nil)
 
 	title := "My first post"
 	group := "dev"
@@ -176,10 +182,12 @@ func TestCreateInteraction(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	idempKey := uuid.New().String()
+	req.Header.Set("Idempotency-Key", idempKey)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if err := h.CreateInteraction(c, server.CreateInteractionParams{}); err != nil {
+	if err := h.CreateInteraction(c, server.CreateInteractionParams{IdempotencyKey: idempKey}); err != nil {
 		t.Fatalf("unexpected error from CreateInteraction: %v", err)
 	}
 
@@ -216,7 +224,7 @@ func TestCreateInteraction_IdempotencyKey(t *testing.T) {
 	e := echo.New()
 	mockPub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(mockPub, repo)
+	h := handler.New(mockPub, repo, nil)
 
 	idempotencyKey := "01923f12-1111-7000-8000-000000000001"
 	title := "Idempotent Title"
@@ -233,7 +241,7 @@ func TestCreateInteraction_IdempotencyKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	params := server.CreateInteractionParams{IdempotencyKey: &idempotencyKey}
+	params := server.CreateInteractionParams{IdempotencyKey: idempotencyKey}
 	if err := h.CreateInteraction(c, params); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +277,7 @@ func TestCreateInteraction_IdempotencyKey(t *testing.T) {
 
 func TestCreateInteractionValidation(t *testing.T) {
 	e := echo.New()
-	h := handler.New(nil, nil)
+	h := handler.New(nil, nil, nil)
 
 	tests := []struct {
 		name    string
@@ -327,7 +335,7 @@ func TestUpdateInteraction(t *testing.T) {
 	e := echo.New()
 	mockPub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(mockPub, repo)
+	h := handler.New(mockPub, repo, nil)
 
 	postID := uuid.Must(uuid.NewV7())
 	title := "Initial Title"
@@ -404,11 +412,68 @@ func TestUpdateInteraction(t *testing.T) {
 	}
 }
 
+// TestUpdateInteraction_PreservesTitleWhenOmitted guards against a regression where a
+// body-only edit wiped the title of a root post (SET title = $3 with a NULL binding).
+func TestUpdateInteraction_PreservesTitleWhenOmitted(t *testing.T) {
+	e := echo.New()
+	mockPub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(mockPub, repo, nil)
+
+	originalTitle := "Original Title"
+
+	for _, tc := range []struct {
+		name string
+		req  server.UpdateInteractionRequest
+	}{
+		{"omitted title", server.UpdateInteractionRequest{Body: "Body only edit", Version: 1}},
+		{"blank title", server.UpdateInteractionRequest{Body: "Body only edit", Title: strPtr("   "), Version: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Fresh post per subtest so both start at version 1.
+			id := uuid.Must(uuid.NewV7())
+			if err := repo.Insert(context.Background(), &database.Interaction{
+				ID: id, GroupID: testGroupRoot, Title: &originalTitle,
+				Body: "Original Body", Author: testAuthorAlice,
+				CreatedAt: time.Now().UTC(), Version: 1,
+			}); err != nil {
+				t.Fatalf("failed to seed interaction: %v", err)
+			}
+
+			body, _ := json.Marshal(tc.req)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/interactions/"+id.String(), bytes.NewReader(body))
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			if err := h.UpdateInteraction(c, id); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d. Body: %s", rec.Code, rec.Body.String())
+			}
+
+			var updated server.Interaction
+			if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if updated.Title == nil || *updated.Title != originalTitle {
+				t.Errorf("expected title to be preserved as %q, got %v", originalTitle, updated.Title)
+			}
+			if updated.Body != tc.req.Body {
+				t.Errorf("expected body %q, got %q", tc.req.Body, updated.Body)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestEventsInteractions(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(pub, repo)
+	h := handler.New(pub, repo, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/interactions/events", nil)
 	ctx, cancel := context.WithCancel(req.Context())
@@ -435,16 +500,18 @@ func TestCreateInteraction_RootTitleRequired(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(pub, repo)
+	h := handler.New(pub, repo, nil)
 
 	// Missing title on root interaction
 	payload := `{"author":"Alice","body":"Missing title body"}`
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", strings.NewReader(payload))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	idempKey := uuid.New().String()
+	req.Header.Set("Idempotency-Key", idempKey)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if err := h.CreateInteraction(c, server.CreateInteractionParams{}); err != nil {
+	if err := h.CreateInteraction(c, server.CreateInteractionParams{IdempotencyKey: idempKey}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.Code != http.StatusBadRequest {
@@ -456,7 +523,7 @@ func TestGetReadyz_Healthy(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(pub, repo)
+	h := handler.New(pub, repo, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -474,7 +541,7 @@ func TestCreateInteraction_NestedReplyDepth(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
-	h := handler.New(pub, repo)
+	h := handler.New(pub, repo, nil)
 
 	// 1. Root post
 	rootID := uuid.Must(uuid.NewV7())
@@ -508,10 +575,12 @@ func TestCreateInteraction_NestedReplyDepth(t *testing.T) {
 	payload := fmt.Sprintf(`{"author":"Charlie","body":"Reply 2","parent_id":"%s"}`, reply1ID)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", strings.NewReader(payload))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	idempKey := uuid.New().String()
+	req.Header.Set("Idempotency-Key", idempKey)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if err := h.CreateInteraction(c, server.CreateInteractionParams{}); err != nil {
+	if err := h.CreateInteraction(c, server.CreateInteractionParams{IdempotencyKey: idempKey}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
@@ -525,5 +594,113 @@ func TestCreateInteraction_NestedReplyDepth(t *testing.T) {
 	}
 	if pub.lastCreatedEvent.RootID == nil || *pub.lastCreatedEvent.RootID != rootID.String() {
 		t.Errorf("expected rootID %s, got %v", rootID.String(), pub.lastCreatedEvent.RootID)
+	}
+}
+
+func TestCreateInteraction_HierarchicalNavigationAndCache(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	cacheInst := cache.NewMemoryCache(&config.Config{
+		MaxCachedInteractions: 100,
+		CacheTTL:              10 * time.Minute,
+	})
+	h := handler.New(pub, repo, cacheInst)
+
+	// 1. Create root post via handler
+	title := "Root Post Title"
+	rootPayload := server.CreateInteractionRequest{
+		Author: "Alice",
+		Title:  &title,
+		Body:   "Root body content",
+	}
+	rootBody, _ := json.Marshal(rootPayload)
+	reqRoot := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", bytes.NewReader(rootBody))
+	reqRoot.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rootKey := uuid.New().String()
+	reqRoot.Header.Set("Idempotency-Key", rootKey)
+	recRoot := httptest.NewRecorder()
+	cRoot := e.NewContext(reqRoot, recRoot)
+
+	if err := h.CreateInteraction(cRoot, server.CreateInteractionParams{IdempotencyKey: rootKey}); err != nil {
+		t.Fatalf("unexpected error creating root post: %v", err)
+	}
+	if recRoot.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", recRoot.Code)
+	}
+	var createdRoot server.Interaction
+	if err := json.Unmarshal(recRoot.Body.Bytes(), &createdRoot); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if createdRoot.Depth != 0 {
+		t.Errorf("expected root depth 0, got %d", createdRoot.Depth)
+	}
+	if createdRoot.RootId != nil {
+		t.Errorf("expected nil RootId for root post, got %v", createdRoot.RootId)
+	}
+
+	// 2. Create Reply 1 (parent = createdRoot.Id) immediately (simulates DB write lag, resolves via MemoryCache)
+	reply1Payload := server.CreateInteractionRequest{
+		Author:   "Bob",
+		ParentId: &createdRoot.Id,
+		Body:     "Direct reply to root post",
+	}
+	reply1Body, _ := json.Marshal(reply1Payload)
+	reqR1 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", bytes.NewReader(reply1Body))
+	reqR1.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	reply1Key := uuid.New().String()
+	reqR1.Header.Set("Idempotency-Key", reply1Key)
+	recR1 := httptest.NewRecorder()
+	cR1 := e.NewContext(reqR1, recR1)
+
+	if err := h.CreateInteraction(cR1, server.CreateInteractionParams{IdempotencyKey: reply1Key}); err != nil {
+		t.Fatalf("unexpected error creating reply 1: %v", err)
+	}
+	if recR1.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", recR1.Code)
+	}
+	var createdR1 server.Interaction
+	if err := json.Unmarshal(recR1.Body.Bytes(), &createdR1); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if createdR1.Depth != 1 {
+		t.Errorf("expected reply 1 depth 1, got %d", createdR1.Depth)
+	}
+	if createdR1.RootId == nil || *createdR1.RootId != createdRoot.Id {
+		t.Errorf("expected reply 1 RootId %s, got %v", createdRoot.Id, createdR1.RootId)
+	}
+
+	// 3. Create Reply 2 (nested child: parent = createdR1.Id)
+	reply2Payload := server.CreateInteractionRequest{
+		Author:   "Charlie",
+		ParentId: &createdR1.Id,
+		Body:     "Nested reply to Bob's reply",
+	}
+	reply2Body, _ := json.Marshal(reply2Payload)
+	reqR2 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", bytes.NewReader(reply2Body))
+	reqR2.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	reply2Key := uuid.New().String()
+	reqR2.Header.Set("Idempotency-Key", reply2Key)
+	recR2 := httptest.NewRecorder()
+	cR2 := e.NewContext(reqR2, recR2)
+
+	if err := h.CreateInteraction(cR2, server.CreateInteractionParams{IdempotencyKey: reply2Key}); err != nil {
+		t.Fatalf("unexpected error creating reply 2: %v", err)
+	}
+	if recR2.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", recR2.Code)
+	}
+	var createdR2 server.Interaction
+	if err := json.Unmarshal(recR2.Body.Bytes(), &createdR2); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if createdR2.Depth != 2 {
+		t.Errorf("expected reply 2 depth 2, got %d", createdR2.Depth)
+	}
+	if createdR2.RootId == nil || *createdR2.RootId != createdRoot.Id {
+		t.Errorf("expected reply 2 RootId to point to root post %s, got %v", createdRoot.Id, createdR2.RootId)
+	}
+	if createdR2.ParentId == nil || *createdR2.ParentId != createdR1.Id {
+		t.Errorf("expected reply 2 ParentId to point to reply 1 %s, got %v", createdR1.Id, createdR2.ParentId)
 	}
 }
