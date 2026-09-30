@@ -65,7 +65,7 @@ func runTests(ctx context.Context, cfg config) error {
 	}
 
 	// 3. Test SSE Stream endpoint
-	fmt.Print("[3/8] Testing SSE /v1/interactions/stream connection... ")
+	fmt.Print("[3/8] Testing SSE /v1/interactions/events connection... ")
 	sseChan, stopSSE, err := startSSEListener(ctx, cfg.apiURL, cfg.groupID)
 	if err != nil {
 		return fmt.Errorf("sse stream: %w", err)
@@ -224,7 +224,7 @@ func setupNATSSubscriber(natsURL, groupID string) (*natsio.Conn, <-chan *natsio.
 }
 
 func startSSEListener(ctx context.Context, apiURL, groupID string) (<-chan string, func(), error) {
-	sseURL := fmt.Sprintf("%s/v1/interactions/stream?group_id=%s", apiURL, groupID)
+	sseURL := fmt.Sprintf("%s/v1/interactions/events?group_id=%s", apiURL, groupID)
 	reqProbe, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return nil, nil, err

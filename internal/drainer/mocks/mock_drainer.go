@@ -10,38 +10,39 @@
 package mocks
 
 import (
+	context "context"
 	reflect "reflect"
 
 	jetstream "github.com/nats-io/nats.go/jetstream"
 	gomock "go.uber.org/mock/gomock"
 )
 
-// MockPullConsumer is a mock of PullConsumer interface.
-type MockPullConsumer struct {
+// MockBatchFetcher is a mock of BatchFetcher interface.
+type MockBatchFetcher struct {
 	ctrl     *gomock.Controller
-	recorder *MockPullConsumerMockRecorder
+	recorder *MockBatchFetcherMockRecorder
 	isgomock struct{}
 }
 
-// MockPullConsumerMockRecorder is the mock recorder for MockPullConsumer.
-type MockPullConsumerMockRecorder struct {
-	mock *MockPullConsumer
+// MockBatchFetcherMockRecorder is the mock recorder for MockBatchFetcher.
+type MockBatchFetcherMockRecorder struct {
+	mock *MockBatchFetcher
 }
 
-// NewMockPullConsumer creates a new mock instance.
-func NewMockPullConsumer(ctrl *gomock.Controller) *MockPullConsumer {
-	mock := &MockPullConsumer{ctrl: ctrl}
-	mock.recorder = &MockPullConsumerMockRecorder{mock}
+// NewMockBatchFetcher creates a new mock instance.
+func NewMockBatchFetcher(ctrl *gomock.Controller) *MockBatchFetcher {
+	mock := &MockBatchFetcher{ctrl: ctrl}
+	mock.recorder = &MockBatchFetcherMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockPullConsumer) EXPECT() *MockPullConsumerMockRecorder {
+func (m *MockBatchFetcher) EXPECT() *MockBatchFetcherMockRecorder {
 	return m.recorder
 }
 
 // Fetch mocks base method.
-func (m *MockPullConsumer) Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+func (m *MockBatchFetcher) Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
 	m.ctrl.T.Helper()
 	varargs := []any{batch}
 	for _, a := range opts {
@@ -54,8 +55,46 @@ func (m *MockPullConsumer) Fetch(batch int, opts ...jetstream.FetchOpt) (jetstre
 }
 
 // Fetch indicates an expected call of Fetch.
-func (mr *MockPullConsumerMockRecorder) Fetch(batch any, opts ...any) *gomock.Call {
+func (mr *MockBatchFetcherMockRecorder) Fetch(batch any, opts ...any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]any{batch}, opts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Fetch", reflect.TypeOf((*MockPullConsumer)(nil).Fetch), varargs...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Fetch", reflect.TypeOf((*MockBatchFetcher)(nil).Fetch), varargs...)
+}
+
+// MockDLQPublisher is a mock of DLQPublisher interface.
+type MockDLQPublisher struct {
+	ctrl     *gomock.Controller
+	recorder *MockDLQPublisherMockRecorder
+	isgomock struct{}
+}
+
+// MockDLQPublisherMockRecorder is the mock recorder for MockDLQPublisher.
+type MockDLQPublisherMockRecorder struct {
+	mock *MockDLQPublisher
+}
+
+// NewMockDLQPublisher creates a new mock instance.
+func NewMockDLQPublisher(ctrl *gomock.Controller) *MockDLQPublisher {
+	mock := &MockDLQPublisher{ctrl: ctrl}
+	mock.recorder = &MockDLQPublisherMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockDLQPublisher) EXPECT() *MockDLQPublisherMockRecorder {
+	return m.recorder
+}
+
+// PublishDLQ mocks base method.
+func (m *MockDLQPublisher) PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PublishDLQ", ctx, originalSubject, data, reason)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PublishDLQ indicates an expected call of PublishDLQ.
+func (mr *MockDLQPublisherMockRecorder) PublishDLQ(ctx, originalSubject, data, reason any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PublishDLQ", reflect.TypeOf((*MockDLQPublisher)(nil).PublishDLQ), ctx, originalSubject, data, reason)
 }

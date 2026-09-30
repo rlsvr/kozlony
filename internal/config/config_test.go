@@ -9,6 +9,7 @@ import (
 )
 
 func TestConfigLoadDefaults(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "info")
 	cfg, err := config.Load(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error loading config: %v", err)

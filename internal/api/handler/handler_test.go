@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,10 @@ import (
 	"kozlony/internal/messaging/events"
 )
 
-const testAuthorAlice = "Alice"
+const (
+	testAuthorAlice = "Alice"
+	testGroupRoot   = "root"
+)
 
 type mockPublisher struct {
 	lastCreatedEvent *events.InteractionCreatedEvent
@@ -42,12 +46,20 @@ func (*mockPublisher) SubscribeEvents(_ context.Context, _ *string) (<-chan []by
 	return ch, func() {}, nil
 }
 
+func (*mockPublisher) Ping(_ context.Context) error {
+	return nil
+}
+
 type mockRepository struct {
 	items map[uuid.UUID]*database.Interaction
 }
 
 func newMockRepository() *mockRepository {
 	return &mockRepository{items: make(map[uuid.UUID]*database.Interaction)}
+}
+
+func (*mockRepository) Ping(_ context.Context) error {
+	return nil
 }
 
 func (m *mockRepository) Insert(_ context.Context, item *database.Interaction) error {
@@ -108,7 +120,9 @@ func (m *mockRepository) ListFeed(_ context.Context, groupID string, _ int, _ *t
 
 func TestHealthEndpoints(t *testing.T) {
 	e := echo.New()
-	h := handler.New(nil, nil)
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -205,8 +219,10 @@ func TestCreateInteraction_IdempotencyKey(t *testing.T) {
 	h := handler.New(mockPub, repo)
 
 	idempotencyKey := "01923f12-1111-7000-8000-000000000001"
+	title := "Idempotent Title"
 	payload := server.CreateInteractionRequest{
 		Author: "Charlie",
+		Title:  &title,
 		Body:   "Idempotent post",
 	}
 	body, _ := json.Marshal(payload)
@@ -229,7 +245,7 @@ func TestCreateInteraction_IdempotencyKey(t *testing.T) {
 	parsedUUID := uuid.MustParse(idempotencyKey)
 	_ = repo.Insert(context.Background(), &database.Interaction{
 		ID:        parsedUUID,
-		GroupID:   "root",
+		GroupID:   testGroupRoot,
 		Author:    payload.Author,
 		Body:      payload.Body,
 		CreatedAt: time.Now().UTC(),
@@ -317,7 +333,7 @@ func TestUpdateInteraction(t *testing.T) {
 	title := "Initial Title"
 	_ = repo.Insert(context.Background(), &database.Interaction{
 		ID:        postID,
-		GroupID:   "root",
+		GroupID:   testGroupRoot,
 		Title:     &title,
 		Body:      "Initial Body",
 		Author:    testAuthorAlice,
@@ -388,13 +404,13 @@ func TestUpdateInteraction(t *testing.T) {
 	}
 }
 
-func TestStreamInteractions(t *testing.T) {
+func TestEventsInteractions(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}
 	repo := newMockRepository()
 	h := handler.New(pub, repo)
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/interactions/stream", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/interactions/events", nil)
 	ctx, cancel := context.WithCancel(req.Context())
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -405,12 +421,109 @@ func TestStreamInteractions(t *testing.T) {
 		cancel()
 	}()
 
-	err := h.StreamInteractions(c, server.StreamInteractionsParams{})
+	err := h.EventsInteractions(c, server.EventsInteractionsParams{})
 	if err != nil {
-		t.Fatalf("unexpected error from StreamInteractions: %v", err)
+		t.Fatalf("unexpected error from EventsInteractions: %v", err)
 	}
 
 	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
 		t.Errorf("expected Content-Type text/event-stream, got %s", rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestCreateInteraction_RootTitleRequired(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo)
+
+	// Missing title on root interaction
+	payload := `{"author":"Alice","body":"Missing title body"}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", strings.NewReader(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := h.CreateInteraction(c, server.CreateInteractionParams{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 Bad Request, got %d", rec.Code)
+	}
+}
+
+func TestGetReadyz_Healthy(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/readyz", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := h.GetReadyz(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rec.Code)
+	}
+}
+
+func TestCreateInteraction_NestedReplyDepth(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo)
+
+	// 1. Root post
+	rootID := uuid.Must(uuid.NewV7())
+	title := "Root Post"
+	_ = repo.Insert(context.Background(), &database.Interaction{
+		ID:        rootID,
+		GroupID:   testGroupRoot,
+		Title:     &title,
+		Body:      "Root body",
+		Author:    "Alice",
+		CreatedAt: time.Now().UTC(),
+		Depth:     0,
+		Version:   1,
+	})
+
+	// 2. Direct reply to root post (depth 1)
+	reply1ID := uuid.Must(uuid.NewV7())
+	_ = repo.Insert(context.Background(), &database.Interaction{
+		ID:        reply1ID,
+		GroupID:   testGroupRoot,
+		RootID:    &rootID,
+		ParentID:  &rootID,
+		Body:      "Reply 1",
+		Author:    "Bob",
+		CreatedAt: time.Now().UTC(),
+		Depth:     1,
+		Version:   1,
+	})
+
+	// 3. Nested reply to reply 1 (should have depth 2 and rootID = rootID)
+	payload := fmt.Sprintf(`{"author":"Charlie","body":"Reply 2","parent_id":"%s"}`, reply1ID)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", strings.NewReader(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := h.CreateInteraction(c, server.CreateInteractionParams{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("expected 200 or 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if pub.lastCreatedEvent == nil {
+		t.Fatal("expected event to be published")
+	}
+	if pub.lastCreatedEvent.Depth != 2 {
+		t.Errorf("expected depth 2, got %d", pub.lastCreatedEvent.Depth)
+	}
+	if pub.lastCreatedEvent.RootID == nil || *pub.lastCreatedEvent.RootID != rootID.String() {
+		t.Errorf("expected rootID %s, got %v", rootID.String(), pub.lastCreatedEvent.RootID)
 	}
 }

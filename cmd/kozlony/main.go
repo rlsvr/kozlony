@@ -74,7 +74,7 @@ func main() {
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
 		} else {
-			d := drainer.New(consumer, repo, cfg)
+			d := drainer.New(consumer, repo, msgClient, cfg)
 			go func() {
 				if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					log.Error().Err(err).Msg("micro-batch drainer worker exited with error")

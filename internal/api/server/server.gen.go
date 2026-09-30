@@ -122,12 +122,12 @@ type ListInteractionsParams struct {
 
 // CreateInteractionParams defines parameters for CreateInteraction.
 type CreateInteractionParams struct {
-	// IdempotencyKey Client-provided idempotency key for safe retries.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+	// IdempotencyKey Client-provided idempotency key used to derive a deterministic interaction ID. Retries with the same key return the existing interaction (200 OK) instead of creating a duplicate.
+	IdempotencyKey string `json:"Idempotency-Key"`
 }
 
-// StreamInteractionsParams defines parameters for StreamInteractions.
-type StreamInteractionsParams struct {
+// EventsInteractionsParams defines parameters for EventsInteractions.
+type EventsInteractionsParams struct {
 	// GroupId Optional board/group filter.
 	GroupId *string `form:"group_id,omitempty" json:"group_id,omitempty"`
 }
@@ -149,9 +149,9 @@ type ServerInterface interface {
 	// CreateInteraction Create an interaction
 	// (POST /v1/interactions)
 	CreateInteraction(ctx echo.Context, params CreateInteractionParams) error
-	// StreamInteractions Stream interactions
-	// (GET /v1/interactions/stream)
-	StreamInteractions(ctx echo.Context, params StreamInteractionsParams) error
+	// EventsInteractions Stream interactions
+	// (GET /v1/interactions/events)
+	EventsInteractions(ctx echo.Context, params EventsInteractionsParams) error
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx echo.Context, id openapi_types.UUID) error
@@ -217,7 +217,7 @@ func (w *ServerInterfaceWrapper) CreateInteraction(ctx echo.Context) error {
 	var params CreateInteractionParams
 
 	headers := ctx.Request().Header
-	// ------------- Optional header parameter "Idempotency-Key" -------------
+	// ------------- Required header parameter "Idempotency-Key" -------------
 	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
 		var IdempotencyKey string
 		n := len(valueList)
@@ -225,12 +225,14 @@ func (w *ServerInterfaceWrapper) CreateInteraction(ctx echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Expected one value for Idempotency-Key, got %d", n))
 		}
 
-		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
 		if err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter Idempotency-Key: %s", err))
 		}
 
-		params.IdempotencyKey = &IdempotencyKey
+		params.IdempotencyKey = IdempotencyKey
+	} else {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Header parameter Idempotency-Key is required, but not found"))
 	}
 
 	// Invoke the callback with all the unmarshaled arguments
@@ -238,12 +240,12 @@ func (w *ServerInterfaceWrapper) CreateInteraction(ctx echo.Context) error {
 	return err
 }
 
-// StreamInteractions converts echo context to params.
-func (w *ServerInterfaceWrapper) StreamInteractions(ctx echo.Context) error {
+// EventsInteractions converts echo context to params.
+func (w *ServerInterfaceWrapper) EventsInteractions(ctx echo.Context) error {
 	var err error
 
 	// Parameter object where we will unmarshal all parameters from the context
-	var params StreamInteractionsParams
+	var params EventsInteractionsParams
 	// ------------- Optional query parameter "group_id" -------------
 
 	err = runtime.BindQueryParameterWithOptions("form", true, false, "group_id", ctx.QueryParams(), &params.GroupId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
@@ -252,7 +254,7 @@ func (w *ServerInterfaceWrapper) StreamInteractions(ctx echo.Context) error {
 	}
 
 	// Invoke the callback with all the unmarshaled arguments
-	err = w.Handler.StreamInteractions(ctx, params)
+	err = w.Handler.EventsInteractions(ctx, params)
 	return err
 }
 
@@ -350,7 +352,7 @@ func RegisterHandlersWithOptions(router EchoRouter, si ServerInterface, options 
 	router.POST(options.BaseURL+"/v1/interactions", wrapper.CreateInteraction, options.OperationMiddlewares["CreateInteraction"]...)
 	router.GET(options.BaseURL+"/v1/interactions/:id", wrapper.GetInteraction, options.OperationMiddlewares["GetInteraction"]...)
 	router.PUT(options.BaseURL+"/v1/interactions/:id", wrapper.UpdateInteraction, options.OperationMiddlewares["UpdateInteraction"]...)
-	router.GET(options.BaseURL+"/v1/interactions/stream", wrapper.StreamInteractions, options.OperationMiddlewares["StreamInteractions"]...)
+	router.GET(options.BaseURL+"/v1/interactions/events", wrapper.EventsInteractions, options.OperationMiddlewares["EventsInteractions"]...)
 
 }
 
@@ -448,20 +450,20 @@ func (response CreateInteraction404JSONResponse) VisitCreateInteractionResponse(
 	return err
 }
 
-type StreamInteractionsRequestObject struct {
-	Params StreamInteractionsParams
+type EventsInteractionsRequestObject struct {
+	Params EventsInteractionsParams
 }
 
-type StreamInteractionsResponseObject interface {
-	VisitStreamInteractionsResponse(w http.ResponseWriter) error
+type EventsInteractionsResponseObject interface {
+	VisitEventsInteractionsResponse(w http.ResponseWriter) error
 }
 
-type StreamInteractions200TexteventStreamResponse struct {
+type EventsInteractions200TexteventStreamResponse struct {
 	Body          io.Reader
 	ContentLength int64
 }
 
-func (response StreamInteractions200TexteventStreamResponse) VisitStreamInteractionsResponse(w http.ResponseWriter) error {
+func (response EventsInteractions200TexteventStreamResponse) VisitEventsInteractionsResponse(w http.ResponseWriter) error {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	if response.ContentLength != 0 {
@@ -646,9 +648,9 @@ type StrictServerInterface interface {
 	// CreateInteraction Create an interaction
 	// (POST /v1/interactions)
 	CreateInteraction(ctx context.Context, request CreateInteractionRequestObject) (CreateInteractionResponseObject, error)
-	// StreamInteractions Stream interactions
-	// (GET /v1/interactions/stream)
-	StreamInteractions(ctx context.Context, request StreamInteractionsRequestObject) (StreamInteractionsResponseObject, error)
+	// EventsInteractions Stream interactions
+	// (GET /v1/interactions/events)
+	EventsInteractions(ctx context.Context, request EventsInteractionsRequestObject) (EventsInteractionsResponseObject, error)
 	// GetInteraction Get interaction with replies
 	// (GET /v1/interactions/{id})
 	GetInteraction(ctx context.Context, request GetInteractionRequestObject) (GetInteractionResponseObject, error)
@@ -761,25 +763,25 @@ func (sh *strictHandler) CreateInteraction(ctx echo.Context, params CreateIntera
 	return nil
 }
 
-// StreamInteractions operation middleware
-func (sh *strictHandler) StreamInteractions(ctx echo.Context, params StreamInteractionsParams) error {
-	var request StreamInteractionsRequestObject
+// EventsInteractions operation middleware
+func (sh *strictHandler) EventsInteractions(ctx echo.Context, params EventsInteractionsParams) error {
+	var request EventsInteractionsRequestObject
 
 	request.Params = params
 
 	handler := func(ctx echo.Context, request interface{}) (interface{}, error) {
-		return sh.ssi.StreamInteractions(ctx.Request().Context(), request.(StreamInteractionsRequestObject))
+		return sh.ssi.EventsInteractions(ctx.Request().Context(), request.(EventsInteractionsRequestObject))
 	}
 	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "StreamInteractions")
+		handler = middleware(handler, "EventsInteractions")
 	}
 
 	response, err := handler(ctx, request)
 
 	if err != nil {
 		return err
-	} else if validResponse, ok := response.(StreamInteractionsResponseObject); ok {
-		return validResponse.VisitStreamInteractionsResponse(ctx.Response())
+	} else if validResponse, ok := response.(EventsInteractionsResponseObject); ok {
+		return validResponse.VisitEventsInteractionsResponse(ctx.Response())
 	} else if response != nil {
 		return fmt.Errorf("unexpected response type: %T", response)
 	}

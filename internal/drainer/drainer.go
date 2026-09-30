@@ -23,16 +23,22 @@ type PullConsumer interface {
 	Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
 }
 
+// DLQPublisher forwards dead-letter / poison messages to the DLQ subject.
+type DLQPublisher interface {
+	PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error
+}
+
 // Drainer micro-batches interaction events from NATS JetStream and bulk-inserts them into PostgreSQL.
 type Drainer struct {
 	consumer      PullConsumer
 	repo          database.Repository
+	dlq           DLQPublisher
 	batchSize     int
 	flushInterval time.Duration
 }
 
 // New creates a new Drainer instance.
-func New(consumer PullConsumer, repo database.Repository, cfg *config.Config) *Drainer {
+func New(consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	if cfg != nil {
@@ -47,6 +53,7 @@ func New(consumer PullConsumer, repo database.Repository, cfg *config.Config) *D
 	return &Drainer{
 		consumer:      consumer,
 		repo:          repo,
+		dlq:           dlq,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 	}
@@ -69,20 +76,21 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 	)
 
 	for msg := range mb.Messages() {
-		rawMsgs = append(rawMsgs, msg)
-
 		var evt events.InteractionCreatedEvent
 		if err := json.Unmarshal(msg.Data(), &evt); err != nil {
-			log.Warn().Err(err).Str("subject", msg.Subject()).Msg("failed to unmarshal message in drainer")
+			log.Warn().Err(err).Str("subject", msg.Subject()).Msg("failed to unmarshal message in drainer, routing to DLQ")
+			d.routeToDLQ(ctx, msg, fmt.Sprintf("unmarshal error: %v", err))
 			continue
 		}
 
 		item, err := eventToInteraction(&evt)
 		if err != nil {
-			log.Warn().Err(err).Str("id", evt.ID).Msg("invalid event payload in drainer")
+			log.Warn().Err(err).Str("id", evt.ID).Msg("invalid event payload in drainer, routing to DLQ")
+			d.routeToDLQ(ctx, msg, fmt.Sprintf("invalid payload: %v", err))
 			continue
 		}
 
+		rawMsgs = append(rawMsgs, msg)
 		interactions = append(interactions, item)
 	}
 
@@ -91,9 +99,6 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 	}
 
 	if len(interactions) == 0 {
-		for _, m := range rawMsgs {
-			_ = m.Ack()
-		}
 		return 0, nil
 	}
 
@@ -111,6 +116,17 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 
 	log.Debug().Int("count", len(interactions)).Msg("successfully drained micro-batch to postgres")
 	return len(interactions), nil
+}
+
+func (d *Drainer) routeToDLQ(ctx context.Context, msg jetstream.Msg, reason string) {
+	if d.dlq != nil {
+		if err := d.dlq.PublishDLQ(ctx, msg.Subject(), msg.Data(), reason); err != nil {
+			log.Error().Err(err).Str("subject", msg.Subject()).Msg("failed to publish poison message to DLQ, naking")
+			_ = msg.Nak()
+			return
+		}
+	}
+	_ = msg.Ack()
 }
 
 // Run continuously processes micro-batches until ctx is canceled.
@@ -148,8 +164,8 @@ func (d *Drainer) Start(ctx context.Context) {
 }
 
 // Start creates a new Drainer and starts its background processing loop.
-func Start(ctx context.Context, consumer PullConsumer, repo database.Repository, cfg *config.Config) *Drainer {
-	d := New(consumer, repo, cfg)
+func Start(ctx context.Context, consumer PullConsumer, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
+	d := New(consumer, repo, dlq, cfg)
 	d.Start(ctx)
 	return d
 }

@@ -55,10 +55,13 @@ paths:
       parameters:
         - name: Idempotency-Key
           in: header
-          description: Client-provided idempotency key for safe retries.
-          required: false
+          description: >-
+            Client-provided idempotency key used to derive a deterministic interaction ID.
+            Retries with the same key return the existing interaction (200 OK) instead of creating a duplicate.
+          required: true
           schema:
             type: string
+            minLength: 1
       requestBody:
         required: true
         content:
@@ -198,11 +201,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /v1/interactions/stream:
+  /v1/interactions/events:
     get:
       summary: Stream interactions
       description: Server-Sent Events (SSE) endpoint broadcasting new interactions and edits in real-time.
-      operationId: StreamInteractions
+      operationId: EventsInteractions
       tags:
         - Interactions
       parameters:

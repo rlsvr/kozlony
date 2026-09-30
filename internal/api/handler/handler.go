@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,7 @@ const (
 
 // Publisher sends interaction events to the JetStream message broker and subscribes to real-time events.
 type Publisher interface {
+	Ping(ctx context.Context) error
 	PublishInteractionCreated(ctx context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error)
 	PublishInteractionEdited(ctx context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error)
 	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
@@ -55,8 +57,30 @@ func (*Handler) GetHealthz(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, server.HealthResponse{Status: "ok"})
 }
 
-// GetReadyz handles readiness probe requests.
-func (*Handler) GetReadyz(ctx echo.Context) error {
+// GetReadyz handles readiness probe requests by verifying database and messaging health.
+func (h *Handler) GetReadyz(ctx echo.Context) error {
+	reqCtx := ctx.Request().Context()
+
+	if h.repo == nil || h.publisher == nil {
+		return ctx.JSON(http.StatusServiceUnavailable, server.ErrorResponse{
+			Error: "service dependencies not initialized",
+		})
+	}
+
+	if err := h.repo.Ping(reqCtx); err != nil {
+		log.Warn().Err(err).Msg("readiness probe: database ping failed")
+		return ctx.JSON(http.StatusServiceUnavailable, server.ErrorResponse{
+			Error: "database unavailable",
+		})
+	}
+
+	if err := h.publisher.Ping(reqCtx); err != nil {
+		log.Warn().Err(err).Msg("readiness probe: nats ping failed")
+		return ctx.JSON(http.StatusServiceUnavailable, server.ErrorResponse{
+			Error: "messaging broker unavailable",
+		})
+	}
+
 	return ctx.JSON(http.StatusOK, server.HealthResponse{Status: "ok"})
 }
 
@@ -75,6 +99,15 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 	}
 	if req.Title != nil && len(*req.Title) > maxTitleLength {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
+	}
+
+	// Title is required for root interactions
+	if req.ParentId == nil {
+		if req.Title == nil || strings.TrimSpace(*req.Title) == "" {
+			return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
+				Error: "title is required for root posts",
+			})
+		}
 	}
 
 	groupID := "root"
@@ -110,8 +143,21 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 	if req.ParentId != nil {
 		pIDStr := req.ParentId.String()
 		parentIDStr = &pIDStr
-		depth = 1
-		rootIDStr = &pIDStr
+
+		d, rID, err := resolveParentHierarchy(ctx.Request().Context(), h.repo, *req.ParentId)
+		if err != nil {
+			if errors.Is(err, database.ErrNotFound) {
+				return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
+					Error: "parent interaction not found",
+				})
+			}
+			log.Error().Err(err).Str("parent_id", pIDStr).Msg("failed to lookup parent interaction")
+			return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{
+				Error: "failed to lookup parent interaction",
+			})
+		}
+		depth = d
+		rootIDStr = rID
 	}
 
 	evt := events.InteractionCreatedEvent{
@@ -276,8 +322,8 @@ func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error 
 	})
 }
 
-// StreamInteractions streams live interaction events to connected clients via Server-Sent Events (SSE).
-func (h *Handler) StreamInteractions(ctx echo.Context, params server.StreamInteractionsParams) error {
+// EventsInteractions streams live interaction events to connected clients via Server-Sent Events (SSE).
+func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInteractionsParams) error {
 	ctx.Response().Header().Set("Content-Type", "text/event-stream")
 	ctx.Response().Header().Set("Cache-Control", "no-cache")
 	ctx.Response().Header().Set("Connection", "keep-alive")
@@ -351,4 +397,25 @@ func resolveInteractionID(idempotencyKey string) (uuid.UUID, error) {
 		return parsed, nil
 	}
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey)), nil
+}
+
+func resolveParentHierarchy(ctx context.Context, repo database.Repository, parentID uuid.UUID) (int, *string, error) {
+	if repo == nil {
+		pStr := parentID.String()
+		return 1, &pStr, nil
+	}
+
+	parent, err := repo.GetByID(ctx, parentID)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	depth := parent.Depth + 1
+	if parent.RootID != nil {
+		rStr := parent.RootID.String()
+		return depth, &rStr, nil
+	}
+
+	rStr := parent.ID.String()
+	return depth, &rStr, nil
 }
