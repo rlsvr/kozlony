@@ -1,0 +1,295 @@
+openapi: "3.0.3"
+info:
+  title: Message Board API
+  description: High-performance message board API with JetStream ingestion and PostgreSQL persistence.
+  version: "0.1.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /v1/healthz:
+    get:
+      summary: Liveness probe
+      description: Returns 200 as long as the HTTP process is alive.
+      operationId: GetHealthz
+      tags:
+        - Health
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/readyz:
+    get:
+      summary: Readiness probe
+      description: Returns 200 when downstream dependencies (NATS, PostgreSQL) are connected.
+      operationId: GetReadyz
+      tags:
+        - Health
+      responses:
+        "200":
+          description: Service is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/interactions:
+    post:
+      summary: Create an interaction
+      description: Creates a new post (with title) or a reply to an existing interaction (without title).
+      operationId: CreateInteraction
+      tags:
+        - Interactions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInteractionRequest"
+      responses:
+        "201":
+          description: Interaction created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
+        "400":
+          description: Invalid input.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Parent interaction not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      summary: List root interactions (Feed)
+      description: Returns a paginated list of root message board posts in a group, ordered descending by creation time.
+      operationId: ListInteractions
+      tags:
+        - Interactions
+      parameters:
+        - name: group_id
+          in: query
+          description: Board/Group identifier (defaults to root).
+          required: false
+          schema:
+            type: string
+            default: "root"
+        - name: limit
+          in: query
+          description: Maximum number of interactions to return.
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: cursor
+          in: query
+          description: Cursor timestamp for scrollback pagination.
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Feed of interactions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionFeedResponse"
+
+  /v1/interactions/{id}:
+    get:
+      summary: Get interaction with replies
+      description: Returns an individual interaction along with its full conversation tree of replies.
+      operationId: GetInteraction
+      tags:
+        - Interactions
+      parameters:
+        - name: id
+          in: path
+          description: Interaction UUID.
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Interaction details with full reply thread.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InteractionDetail"
+        "404":
+          description: Interaction not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/events/live:
+    get:
+      summary: Live event stream
+      description: Server-Sent Events (SSE) endpoint broadcasting new interactions and edits in real-time.
+      operationId: SubscribeLiveEvents
+      tags:
+        - Events
+      parameters:
+        - name: group_id
+          in: query
+          description: Optional board/group filter.
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE text/event-stream of interaction events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: "post not found"
+
+    CreateInteractionRequest:
+      type: object
+      required:
+        - body
+        - author
+      properties:
+        group_id:
+          type: string
+          default: "root"
+          description: Board/Group identifier.
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for root posts; points to immediate parent for replies.
+        title:
+          type: string
+          nullable: true
+          description: Title for root posts; omitted or null for replies.
+        body:
+          type: string
+          description: Markdown/text content of the post or reply.
+        author:
+          type: string
+          description: Username or display name of the author.
+
+    Interaction:
+      type: object
+      required:
+        - id
+        - group_id
+        - body
+        - author
+        - created_at
+        - reply_count
+        - depth
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Time-ordered UUIDv7 identifier.
+        group_id:
+          type: string
+          example: "root"
+        root_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for root posts; points to the conversation thread root.
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for root posts; points to immediate parent interaction.
+        title:
+          type: string
+          nullable: true
+          example: "Welcome to the Message Board"
+        body:
+          type: string
+          example: "This is the body content."
+        author:
+          type: string
+          example: "Alice"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        reply_count:
+          type: integer
+          default: 0
+        depth:
+          type: integer
+          default: 0
+          description: Nesting depth (0 = root post, 1 = direct reply, 2+ = nested).
+
+    InteractionFeedResponse:
+      type: object
+      required:
+        - interactions
+      properties:
+        interactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Interaction"
+        next_cursor:
+          type: string
+          format: date-time
+          nullable: true
+          description: Cursor to pass as cursor query param for subsequent page.
+
+    InteractionDetail:
+      type: object
+      required:
+        - interaction
+        - replies
+      properties:
+        interaction:
+          $ref: "#/components/schemas/Interaction"
+        replies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Interaction"
