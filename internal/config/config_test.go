@@ -26,12 +26,20 @@ func TestConfigLoadDefaults(t *testing.T) {
 	if cfg.MaxCachedInteractions != 500000 {
 		t.Errorf("expected MaxCachedInteractions 500000, got %d", cfg.MaxCachedInteractions)
 	}
+	if cfg.NATSConcurrentSubscribers != 32 {
+		t.Errorf("expected NATSConcurrentSubscribers 32, got %d", cfg.NATSConcurrentSubscribers)
+	}
+	if cfg.NATSStreamRetention != 336*time.Hour {
+		t.Errorf("expected NATSStreamRetention 336h, got %v", cfg.NATSStreamRetention)
+	}
 }
 
 func TestConfigLoadEnvOverride(t *testing.T) {
 	t.Setenv("ADDR", ":9090")
 	t.Setenv("NATS_STREAM_NAME", "CUSTOM_BOARD")
 	t.Setenv("DRAIN_FLUSH_INTERVAL", "100ms")
+	t.Setenv("NATS_CONCURRENT_SUBSCRIBERS", "64")
+	t.Setenv("NATS_STREAM_RETENTION", "720h")
 
 	cfg, err := config.Load(context.Background())
 	if err != nil {
@@ -46,5 +54,11 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.DrainFlushInterval != 100*time.Millisecond {
 		t.Errorf("expected 100ms, got %v", cfg.DrainFlushInterval)
+	}
+	if cfg.NATSConcurrentSubscribers != 64 {
+		t.Errorf("expected 64, got %d", cfg.NATSConcurrentSubscribers)
+	}
+	if cfg.NATSStreamRetention != 720*time.Hour {
+		t.Errorf("expected 720h, got %v", cfg.NATSStreamRetention)
 	}
 }

@@ -17,10 +17,12 @@ type Config struct {
 	DebugMode       bool          `env:"DEBUG_MODE,default=false"`
 
 	// NATS JetStream configuration
-	NATSURL          string        `env:"NATS_URL,default=nats://localhost:4222"`
-	NATSStreamName   string        `env:"NATS_STREAM_NAME,default=BOARD"`
-	NATSConsumerName string        `env:"NATS_CONSUMER_NAME,default=board-drainer"`
-	NATSAckWait      time.Duration `env:"NATS_ACK_WAIT,default=30s"`
+	NATSURL                   string        `env:"NATS_URL,default=nats://localhost:4222"`
+	NATSStreamName            string        `env:"NATS_STREAM_NAME,default=BOARD"`
+	NATSConsumerName          string        `env:"NATS_CONSUMER_NAME,default=board-drainer"`
+	NATSAckWait               time.Duration `env:"NATS_ACK_WAIT,default=30s"`
+	NATSConcurrentSubscribers int           `env:"NATS_CONCURRENT_SUBSCRIBERS,default=32"`
+	NATSStreamRetention       time.Duration `env:"NATS_STREAM_RETENTION,default=336h"`
 
 	// PostgreSQL persistence configuration
 	DatabaseURL string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5432/messageboard?sslmode=disable"`
