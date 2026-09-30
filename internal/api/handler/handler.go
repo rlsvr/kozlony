@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,10 +39,17 @@ type Publisher interface {
 	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
 }
 
+type cachedInteraction struct {
+	ID     uuid.UUID
+	RootID *uuid.UUID
+	Depth  int
+}
+
 // Handler implements server.ServerInterface.
 type Handler struct {
-	publisher Publisher
-	repo      database.Repository
+	publisher          Publisher
+	repo               database.Repository
+	recentInteractions sync.Map
 }
 
 // New creates a new Handler instance with publisher and database repository dependencies.
@@ -144,7 +152,7 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 		pIDStr := req.ParentId.String()
 		parentIDStr = &pIDStr
 
-		d, rID, err := resolveParentHierarchy(ctx.Request().Context(), h.repo, *req.ParentId)
+		d, rID, err := h.resolveParentHierarchy(ctx.Request().Context(), *req.ParentId)
 		if err != nil {
 			if errors.Is(err, database.ErrNotFound) {
 				return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
@@ -180,6 +188,18 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 			return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to persist interaction"})
 		}
 	}
+
+	var rUUID *uuid.UUID
+	if rootIDStr != nil {
+		if parsed, err := uuid.Parse(*rootIDStr); err == nil {
+			rUUID = &parsed
+		}
+	}
+	h.recentInteractions.Store(newID, cachedInteraction{
+		ID:     newID,
+		RootID: rUUID,
+		Depth:  depth,
+	})
 
 	resp := server.Interaction{
 		Id:         newID,
@@ -399,13 +419,24 @@ func resolveInteractionID(idempotencyKey string) (uuid.UUID, error) {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey)), nil
 }
 
-func resolveParentHierarchy(ctx context.Context, repo database.Repository, parentID uuid.UUID) (int, *string, error) {
-	if repo == nil {
+func (h *Handler) resolveParentHierarchy(ctx context.Context, parentID uuid.UUID) (int, *string, error) {
+	if val, ok := h.recentInteractions.Load(parentID); ok {
+		cached := val.(cachedInteraction)
+		depth := cached.Depth + 1
+		if cached.RootID != nil {
+			rStr := cached.RootID.String()
+			return depth, &rStr, nil
+		}
+		rStr := cached.ID.String()
+		return depth, &rStr, nil
+	}
+
+	if h.repo == nil {
 		pStr := parentID.String()
 		return 1, &pStr, nil
 	}
 
-	parent, err := repo.GetByID(ctx, parentID)
+	parent, err := h.repo.GetByID(ctx, parentID)
 	if err != nil {
 		return 0, nil, err
 	}
