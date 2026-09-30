@@ -153,3 +153,28 @@ func TestPublishNilArguments(t *testing.T) {
 		t.Error("expected error publishing nil CreateInteractionCommand")
 	}
 }
+
+func TestInitNilConfig(t *testing.T) {
+	client, err := messaging.Init(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error when passing nil config, got nil")
+	}
+	if client != nil {
+		t.Fatalf("expected nil client, got %v", client)
+	}
+}
+
+func TestInitEmptyURL(t *testing.T) {
+	cfg := &config.Config{
+		NATSURL: "",
+		AppName: "test-app",
+	}
+
+	client, err := messaging.Init(context.Background(), cfg)
+	if err == nil {
+		if client != nil {
+			client.Close()
+		}
+		t.Fatal("expected error connecting with empty NATS URL in Init")
+	}
+}
