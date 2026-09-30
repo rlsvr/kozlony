@@ -243,6 +243,32 @@ func (c *Client) Conn() *qpnats.Conn {
 	return c.conn
 }
 
+// Ping checks whether the NATS connection is active.
+func (c *Client) Ping(_ context.Context) error {
+	if c == nil || c.conn == nil || c.conn.Raw() == nil || !c.conn.Raw().IsConnected() {
+		return errors.New("nats client not connected")
+	}
+	return nil
+}
+
+// PublishDLQ publishes a poison or unprocessable message to the dead letter queue stream.
+func (c *Client) PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("nats client not connected")
+	}
+
+	dlqSubject := fmt.Sprintf("%s.dlq", c.cfg.NATSStreamName)
+	msg := &natsio.Msg{
+		Subject: dlqSubject,
+		Data:    data,
+		Header:  natsio.Header{},
+	}
+	msg.Header.Set("X-DLQ-Reason", reason)
+	msg.Header.Set("X-Original-Subject", originalSubject)
+	_, err := c.PublishMsg(ctx, msg)
+	return err
+}
+
 // Close gracefully stops all consumers and closes the NATS connection.
 func (c *Client) Close() {
 	c.mu.Lock()

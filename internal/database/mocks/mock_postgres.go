@@ -256,6 +256,20 @@ func (mr *MockRepositoryMockRecorder) ListFeed(ctx, groupID, limit, before any) 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListFeed", reflect.TypeOf((*MockRepository)(nil).ListFeed), ctx, groupID, limit, before)
 }
 
+// Ping mocks base method.
+func (m *MockRepository) Ping(ctx context.Context) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Ping", ctx)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Ping indicates an expected call of Ping.
+func (mr *MockRepositoryMockRecorder) Ping(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ping", reflect.TypeOf((*MockRepository)(nil).Ping), ctx)
+}
+
 // Update mocks base method.
 func (m *MockRepository) Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*database.Interaction, error) {
 	m.ctrl.T.Helper()

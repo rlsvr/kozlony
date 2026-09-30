@@ -78,7 +78,7 @@ func TestProcessBatch_Success(t *testing.T) {
 		DrainBatchSize:     10,
 		DrainFlushInterval: 50 * time.Millisecond,
 	}
-	d := drainer.New(mockConsumer, mockRepo, cfg)
+	d := drainer.New(mockConsumer, mockRepo, nil, cfg)
 
 	id := uuid.Must(uuid.NewV7()).String()
 	evt := events.InteractionCreatedEvent{
@@ -135,7 +135,7 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
-	d := drainer.New(mockConsumer, mockRepo, nil)
+	d := drainer.New(mockConsumer, mockRepo, nil, nil)
 
 	evt := events.InteractionCreatedEvent{
 		Author:    "Bob",
@@ -183,7 +183,7 @@ func TestProcessBatch_EmptyMessages(t *testing.T) {
 	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
-	d := drainer.New(mockConsumer, mockRepo, nil)
+	d := drainer.New(mockConsumer, mockRepo, nil, nil)
 
 	batchCh := make(chan jetstream.Msg)
 	close(batchCh)
@@ -202,6 +202,37 @@ func TestProcessBatch_EmptyMessages(t *testing.T) {
 	}
 }
 
+func TestProcessBatch_CorruptMessage_RoutesToDLQ(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+	mockDLQ := drainermocks.NewMockDLQPublisher(ctrl)
+
+	d := drainer.New(mockConsumer, mockRepo, mockDLQ, nil)
+
+	corruptMsg := newFakeMsg("BOARD.root.evt.created", []byte("invalid-json{"))
+	batchCh := make(chan jetstream.Msg, 1)
+	batchCh <- corruptMsg
+	close(batchCh)
+	batch := &fakeMessageBatch{ch: batchCh}
+
+	mockConsumer.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batch, nil)
+	mockDLQ.EXPECT().PublishDLQ(gomock.Any(), "BOARD.root.evt.created", []byte("invalid-json{"), gomock.Any()).Return(nil)
+
+	count, err := d.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected count 0, got %d", count)
+	}
+	if !corruptMsg.acked {
+		t.Error("expected corrupt message to be acked after successful DLQ publish")
+	}
+}
+
 func TestDrainer_RunShutdown(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -209,7 +240,7 @@ func TestDrainer_RunShutdown(t *testing.T) {
 	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
-	d := drainer.New(mockConsumer, mockRepo, nil)
+	d := drainer.New(mockConsumer, mockRepo, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -226,7 +257,7 @@ func TestDrainer_Start(t *testing.T) {
 	mockConsumer := drainermocks.NewMockPullConsumer(ctrl)
 	mockRepo := dbmocks.NewMockRepository(ctrl)
 
-	d := drainer.New(mockConsumer, mockRepo, nil)
+	d := drainer.New(mockConsumer, mockRepo, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -245,7 +276,7 @@ func TestDrainer_StartHelper(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	d := drainer.Start(ctx, mockConsumer, mockRepo, nil)
+	d := drainer.Start(ctx, mockConsumer, mockRepo, nil, nil)
 	if d == nil {
 		t.Fatal("expected non-nil drainer from Start helper")
 	}

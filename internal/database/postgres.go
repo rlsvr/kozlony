@@ -78,6 +78,7 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 
 // Repository defines interactions storage methods.
 type Repository interface {
+	Ping(ctx context.Context) error
 	Insert(ctx context.Context, item *Interaction) error
 	InsertBatch(ctx context.Context, items []*Interaction) error
 	Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*Interaction, error)
@@ -94,6 +95,14 @@ type InteractionRepository struct {
 // NewInteractionRepository constructs a new InteractionRepository.
 func NewInteractionRepository(pool PgxPool) *InteractionRepository {
 	return &InteractionRepository{pool: pool}
+}
+
+// Ping verifies database connectivity.
+func (r *InteractionRepository) Ping(ctx context.Context) error {
+	if r.pool == nil {
+		return errors.New("database pool is nil")
+	}
+	return r.pool.Ping(ctx)
 }
 
 // Insert writes a single interaction to PostgreSQL.
@@ -130,11 +139,20 @@ func (r *InteractionRepository) Insert(ctx context.Context, item *Interaction) e
 	return nil
 }
 
-// InsertBatch writes a batch of interactions to PostgreSQL using a single transaction.
+// InsertBatch writes a batch of interactions to PostgreSQL using a single atomic transaction
+// and updates reply counts for direct parents and root posts.
 func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Interaction) error {
 	if len(items) == 0 {
 		return nil
 	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin batch transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
 
 	batch := &pgx.Batch{}
 	query := `
@@ -145,6 +163,7 @@ func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Intera
 		) ON CONFLICT (id) DO NOTHING;
 	`
 
+	replyIncrements := make(map[uuid.UUID]int)
 	for _, item := range items {
 		version := item.Version
 		if version <= 0 {
@@ -164,27 +183,46 @@ func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Intera
 			item.Depth,
 			version,
 		)
-	}
 
-	br := r.pool.SendBatch(ctx, batch)
-	defer func() {
-		_ = br.Close()
-	}()
-
-	for range items {
-		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("execute batch item: %w", err)
+		if item.ParentID != nil {
+			replyIncrements[*item.ParentID]++
+		}
+		if item.RootID != nil && (item.ParentID == nil || *item.RootID != *item.ParentID) {
+			replyIncrements[*item.RootID]++
 		}
 	}
 
+	br := tx.SendBatch(ctx, batch)
+	for range items {
+		if _, err := br.Exec(); err != nil {
+			_ = br.Close()
+			return fmt.Errorf("execute batch item: %w", err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("close batch results: %w", err)
+	}
+
+	for id, count := range replyIncrements {
+		_, err := tx.Exec(ctx, `UPDATE interactions SET reply_count = reply_count + $1 WHERE id = $2`, count, id)
+		if err != nil {
+			return fmt.Errorf("update reply_count for %s: %w", id, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit batch transaction: %w", err)
+	}
 	return nil
 }
 
 // Update updates an interaction body and title with optimistic concurrency version control.
 func (r *InteractionRepository) Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*Interaction, error) {
+	// COALESCE preserves the existing title when the client omits it, so a
+	// body-only edit can never silently wipe a root post's title.
 	query := `
 		UPDATE interactions
-		SET title = $3, body = $4, version = version + 1, updated_at = NOW()
+		SET title = COALESCE($3, title), body = $4, version = version + 1, updated_at = NOW()
 		WHERE id = $1 AND version = $2
 		RETURNING id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version;
 	`
