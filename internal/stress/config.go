@@ -31,7 +31,7 @@ func DefaultConfig() Config {
 		RPS:            0,
 		MinThink:       1 * time.Second,
 		MaxThink:       3 * time.Second,
-		Duration:       30 * time.Second,
+		Duration:       0,
 		GroupID:        "root",
 		ReportInterval: 1 * time.Second,
 		RootWeight:     20,

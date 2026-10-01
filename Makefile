@@ -3,6 +3,8 @@ BINARY  := bin/kozlony
 CMD     := ./cmd/kozlony
 STRESS_BINARY := bin/stresstest
 STRESS_CMD    := ./cmd/stresstest
+TUI_BINARY    := bin/kozlony-tui
+TUI_CMD       := ./tools/tui
 
 OAPI_CODEGEN  := oapi-codegen
 GOLANGCI_LINT := golangci-lint
@@ -16,7 +18,7 @@ ASYNCAPI_CODEGEN_FLAGS := --only-models --struct-name-from-title --resolve-exten
 export
 
 .PHONY: all build run test test-verbose fmt lint lint-fix check clean \
-	openapi-gen asyncapi-gen gen mocks build-stress stress
+	openapi-gen asyncapi-gen gen mocks build-stress stress build-tui tui
 
 ## all: generate + build + test
 all: gen mocks build test
@@ -62,6 +64,15 @@ build-stress:
 ## stress: run the stress test tool (pass ARGS="-users 50 -rps 100")
 stress: build-stress
 	./$(STRESS_BINARY) $(ARGS)
+
+## build-tui: compile the interactive TUI load monitor
+build-tui:
+	@mkdir -p bin
+	go build -o $(TUI_BINARY) $(TUI_CMD)
+
+## tui: run the interactive TUI load & stack monitor (pass ARGS="..." to customize)
+tui: build-tui
+	./$(TUI_BINARY) $(ARGS)
 
 ## run: compile and execute the application
 run: build

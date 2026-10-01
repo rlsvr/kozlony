@@ -215,3 +215,85 @@ func percent(part, total int64) float64 {
 	}
 	return (float64(part) / float64(total)) * 100.0
 }
+
+// Snapshot holds a point-in-time metrics state suitable for rendering in dashboards and TUIs.
+type Snapshot struct {
+	StartTime       time.Time
+	Elapsed         time.Duration
+	TotalRequests   int64
+	SuccessRequests int64
+	ErrorRequests   int64
+	IntervalRPS     float64
+	OverallRPS      float64
+	IntervalP50     time.Duration
+	IntervalP90     time.Duration
+	IntervalP99     time.Duration
+	IntervalMax     time.Duration
+	AllP50          time.Duration
+	AllP90          time.Duration
+	AllP99          time.Duration
+	AllMax          time.Duration
+	ActionCounts    map[string]int64
+	StatusCodes     map[int]int64
+}
+
+// Snapshot captures the current metrics values and resets the interval counters.
+func (m *Metrics) Snapshot() Snapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(m.startTime)
+	intervalDuration := now.Sub(m.lastReportTime).Seconds()
+	if intervalDuration <= 0 {
+		intervalDuration = 1.0
+	}
+
+	intervalRPS := float64(m.intervalTotal) / intervalDuration
+	intP50, intP90, intP99, intMax := LatencyPercentiles(m.intervalLats)
+	allP50, allP90, allP99, allMax := LatencyPercentiles(m.allLatencies)
+
+	totalReqs := m.totalRequests.Load()
+	okReqs := m.successRequests.Load()
+	errReqs := m.errorRequests.Load()
+
+	var overallRPS float64
+	if elapsed.Seconds() > 0 {
+		overallRPS = float64(totalReqs) / elapsed.Seconds()
+	}
+
+	actions := make(map[string]int64, len(m.actionCounts))
+	for k, v := range m.actionCounts {
+		actions[k] = v
+	}
+	codes := make(map[int]int64, len(m.statusCodes))
+	for k, v := range m.statusCodes {
+		codes[k] = v
+	}
+
+	m.lastReportTime = now
+	m.intervalTotal = 0
+	m.intervalSuccess = 0
+	m.intervalError = 0
+	m.intervalLats = m.intervalLats[:0]
+
+	return Snapshot{
+		StartTime:       m.startTime,
+		Elapsed:         elapsed,
+		TotalRequests:   totalReqs,
+		SuccessRequests: okReqs,
+		ErrorRequests:   errReqs,
+		IntervalRPS:     intervalRPS,
+		OverallRPS:      overallRPS,
+		IntervalP50:     intP50,
+		IntervalP90:     intP90,
+		IntervalP99:     intP99,
+		IntervalMax:     intMax,
+		AllP50:          allP50,
+		AllP90:          allP90,
+		AllP99:          allP99,
+		AllMax:          allMax,
+		ActionCounts:    actions,
+		StatusCodes:     codes,
+	}
+}

@@ -122,6 +122,8 @@ Ensure the following tools are installed:
 | `make build` | Compiles the binary into `bin/kozlony`. |
 | `make build-stress` | Compiles the stress testing CLI binary into `bin/stresstest`. |
 | `make stress` | Runs the stress testing tool (pass `ARGS="..."` to customize). |
+| `make build-tui` | Compiles the interactive TUI load monitor into `bin/kozlony-tui`. |
+| `make tui` | Runs the interactive TUI load & stack monitor (pass `ARGS="..."` to customize). |
 | `make run` | Builds and executes the server. |
 | `make test` | Runs unit and integration tests with the Go race detector (`-race`). |
 | `make test-verbose` | Runs tests in verbose mode (`-v`). |
@@ -265,7 +267,7 @@ A dedicated load-generation and pressure-controlling CLI app inspired by product
 
 #### Running the Stress Test:
 ```bash
-# Compile and run with defaults (20 users, 1..3s think time, 30s duration)
+# Compile and run with defaults (20 users, 1..3s think time, indefinite duration)
 make stress
 
 # Custom run: 50 concurrent users, rate-limited at 200 req/s, 10s test duration
@@ -273,6 +275,57 @@ make stress ARGS="-users 50 -rps 200 -duration 10s"
 
 # Directly via binary
 ./bin/stresstest -url http://localhost:8080 -users 100 -rps 500 -min-think 200ms -max-think 800ms
+```
+
+---
+
+### Interactive TUI Stack & Load Monitor (`tools/tui`)
+An interactive single-pane terminal dashboard built with **Bubble Tea** and **Lip Gloss**.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ ⚡ KOZLONY TUI LOAD & STACK MONITOR  16:50:12  ● ACTIVE  target: http://localhost:8080  │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ WORKLOAD & THROUGHPUT                                                                  │
+│   Throughput:  1074.2 req/s (overall: 1060.1 req/s)   Requests: 21,500 (99.4% ok)      │
+│   Latencies (Window): P50: 700µs | P90: 2.2ms | P99: 9.0ms | Max: 53.4ms               │
+│                                                                                        │
+│   ACTIONS BREAKDOWN                    HTTP STATUS RESPONSES                           │
+│     create_reply      11759 (54.7%)      HTTP 200 OK:         5259 (24.5%)             │
+│     create_root        4350 (20.2%)      HTTP 201 Created:   16109 (74.9%)             │
+│     edit (OCC)         3292 (15.3%)      HTTP 409 Conflict:      4 ( 0.0%)             │
+│     read_feed          1034 ( 4.8%)      HTTP 404 Cold Miss:   128 ( 0.6%)             │
+│     read_interaction   1065 ( 5.0%)      HTTP 5xx Server:        0 ( 0.0%)             │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ SYSTEM RESOURCES (CPU & RAM)                                                           │
+│   Kozlony Service (Echo+App)      CPU:   0.9% [■░░░░░░░░░░░░░░░░░░░]  RAM:    50.4 MB  │
+│   PostgreSQL 17 (Batched Ingest)  CPU:  24.5% [■■■■■░░░░░░░░░░░░░░░]  RAM:   122.2 MB  │
+│   NATS JetStream (File Engine)    CPU:  18.9% [■■■■░░░░░░░░░░░░░░░░]  RAM:    50.9 MB  │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ DATABASE & HIERARCHICAL CONVERSATION STATE                                             │
+│   PostgreSQL State: ONLINE | In-Memory Pool: 10,000 items                              │
+│   Total Ingested:    16315 rows | Root Discussions:    4408 | Replies:       11907     │
+│   Max Tree Depth:       13 levels | Reply Counts Incremented:     7275 posts           │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Features & Hotkeys:
+- **Continuous Real-Time Workload Generation**: Runs indefinitely by default (`duration = 0`) until stopped.
+- **Dynamic Pacing Adjustment**: Press `[+]` or `[-]` to raise or lower the target RPS ceiling on the fly.
+- **Pause & Resume**: Press `[space]` to pause the simulated workload while keeping live stack monitoring active.
+- **Clear Metrics**: Press `[c]` to reset interval and cumulative counters without restarting the process.
+- **Clean Exit**: Press `[q]` or `Ctrl+C` to cleanly terminate workers and restore terminal alt-screen.
+
+#### Running the TUI:
+```bash
+# Launch with defaults (100 users, 1000 req/s ceiling, indefinite run)
+make tui
+
+# Custom parameters:
+make tui ARGS="-users 50 -rps 500"
+
+# Direct binary execution:
+./bin/kozlony-tui -url http://localhost:8080 -users 150 -rps 1000 -min-think 10ms -max-think 60ms
 ```
 
 ---
