@@ -43,6 +43,16 @@ func main() {
 	fmt.Printf("Group ID:         %s\n", cfg.GroupID)
 	fmt.Println("================================================")
 
+	avgThink := (cfg.MinThink + cfg.MaxThink) / 2
+	if avgThink > 0 && cfg.RPS > 0 {
+		maxAchievableRPS := float64(cfg.Workers) / avgThink.Seconds()
+		if cfg.RPS > maxAchievableRPS {
+			fmt.Printf("⚠️  NOTE: With %d workers and avg think time %v, throughput is physically capped at ~%.0f req/s.\n", cfg.Workers, avgThink, maxAchievableRPS)
+			fmt.Printf("   To achieve %.0f req/s, set -min-think 0ms -max-think 0ms (pacing is controlled by -rps).\n", cfg.RPS)
+			fmt.Println("================================================")
+		}
+	}
+
 	pool := stress.NewInteractionPool(10000)
 	metrics := stress.NewMetrics()
 
