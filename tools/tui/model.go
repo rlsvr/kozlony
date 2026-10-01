@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/rlsvr/kozlony/internal/stress"
+	"github.com/rlsvr/kozlony/tools/status"
 )
 
 type tickMsg time.Time
@@ -18,8 +18,8 @@ type Model struct {
 	targetURL    string
 	sampler      *Sampler
 	sysSnap      SystemSnapshot
-	metricsSnap  stress.Snapshot
-	runnerStatus stress.RunnerStatus
+	metricsSnap  status.Snapshot
+	runnerStatus status.RunnerStatus
 	runnerActive bool
 
 	startTime time.Time
@@ -39,10 +39,10 @@ func NewModel(statusFile, targetURL string, sampler *Sampler) Model {
 	}
 
 	// Try reading initial status if file exists
-	if status, err := stress.LoadRunnerStatus(statusFile); err == nil {
-		m.runnerStatus = status
-		m.metricsSnap = status.Snapshot
-		if status.Active && time.Since(status.UpdatedAt) < 4*time.Second {
+	if s, err := status.LoadRunnerStatus(statusFile); err == nil {
+		m.runnerStatus = s
+		m.metricsSnap = s.Snapshot
+		if s.Active && time.Since(s.UpdatedAt) < 4*time.Second {
 			m.runnerActive = true
 		}
 	}
@@ -70,7 +70,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "c":
 			// Clear local snapshot display
-			m.metricsSnap = stress.Snapshot{}
+			m.metricsSnap = status.Snapshot{}
 		}
 
 	case tea.WindowSizeMsg:
@@ -94,22 +94,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateRunnerStatus() {
-	status, err := stress.LoadRunnerStatus(m.statusFile)
+	s, err := status.LoadRunnerStatus(m.statusFile)
 	if err != nil {
 		m.runnerActive = false
 		return
 	}
 
-	m.runnerStatus = status
-	if status.Active && time.Since(status.UpdatedAt) < 4*time.Second {
+	m.runnerStatus = s
+	if s.Active && time.Since(s.UpdatedAt) < 4*time.Second {
 		m.runnerActive = true
-		m.metricsSnap = status.Snapshot
+		m.metricsSnap = s.Snapshot
 		return
 	}
 
 	m.runnerActive = false
-	if status.Snapshot.TotalRequests > 0 && m.metricsSnap.TotalRequests == 0 {
-		m.metricsSnap = status.Snapshot
+	if s.Snapshot.TotalRequests > 0 && m.metricsSnap.TotalRequests == 0 {
+		m.metricsSnap = s.Snapshot
 	}
 }
 

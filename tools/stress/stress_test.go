@@ -1,4 +1,4 @@
-package stress_test
+package main
 
 import (
 	"bytes"
@@ -14,14 +14,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/rlsvr/kozlony/internal/stress"
 )
 
 const fieldInteractions = "interactions"
 
 func TestConfigValidation(t *testing.T) {
-	cfg := stress.DefaultConfig()
+	cfg := DefaultConfig()
 	require.NoError(t, cfg.Validate())
 
 	invalidURL := cfg
@@ -37,7 +35,7 @@ func TestConfigValidation(t *testing.T) {
 	require.Error(t, invalidWorkers.Validate())
 
 	tooManyWorkers := cfg
-	tooManyWorkers.Workers = stress.MaxAllowedWorkers + 1
+	tooManyWorkers.Workers = MaxAllowedWorkers + 1
 	require.Error(t, tooManyWorkers.Validate())
 
 	invalidThink := cfg
@@ -84,7 +82,7 @@ func TestParseFlags(t *testing.T) {
 		"-group", "custom-group",
 	}
 
-	cfg, err := stress.ParseFlags(args)
+	cfg, err := ParseFlags(args)
 	require.NoError(t, err)
 	assert.Equal(t, "http://test-server:9090", cfg.TargetURL)
 	assert.Equal(t, 1000000, cfg.Users)
@@ -99,7 +97,7 @@ func TestParseFlags(t *testing.T) {
 }
 
 func TestInteractionPool(t *testing.T) {
-	pool := stress.NewInteractionPool(3)
+	pool := NewInteractionPool(3)
 	assert.Equal(t, 0, pool.Size())
 
 	_, ok := pool.GetRandomParent()
@@ -110,17 +108,17 @@ func TestInteractionPool(t *testing.T) {
 	id3 := uuid.New()
 	id4 := uuid.New()
 
-	pool.Add(stress.InteractionRef{ID: id1, Version: 1})
-	pool.Add(stress.InteractionRef{ID: id2, Version: 1})
-	pool.Add(stress.InteractionRef{ID: id3, Version: 1})
+	pool.Add(InteractionRef{ID: id1, Version: 1})
+	pool.Add(InteractionRef{ID: id2, Version: 1})
+	pool.Add(InteractionRef{ID: id3, Version: 1})
 	assert.Equal(t, 3, pool.Size())
 
 	// Re-adding existing ID updates without expanding
-	pool.Add(stress.InteractionRef{ID: id2, Version: 2})
+	pool.Add(InteractionRef{ID: id2, Version: 2})
 	assert.Equal(t, 3, pool.Size())
 
 	// Eviction of oldest (id1)
-	pool.Add(stress.InteractionRef{ID: id4, Version: 1})
+	pool.Add(InteractionRef{ID: id4, Version: 1})
 	assert.Equal(t, 3, pool.Size())
 
 	// Test UpdateVersion
@@ -156,7 +154,7 @@ func TestInteractionPoolSeed(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := stress.NewInteractionPool(10)
+	pool := NewInteractionPool(10)
 	err := pool.SeedFromFeed(context.Background(), ts.URL, "test-group")
 	require.NoError(t, err)
 	assert.Equal(t, 1, pool.Size())
@@ -167,7 +165,7 @@ func TestInteractionPoolSeed(t *testing.T) {
 }
 
 func TestMetricsPercentiles(t *testing.T) {
-	p50, p90, p99, maxLat := stress.LatencyPercentiles(nil)
+	p50, p90, p99, maxLat := LatencyPercentiles(nil)
 	assert.Equal(t, time.Duration(0), p50)
 	assert.Equal(t, time.Duration(0), p90)
 	assert.Equal(t, time.Duration(0), p99)
@@ -180,7 +178,7 @@ func TestMetricsPercentiles(t *testing.T) {
 		40 * time.Millisecond,
 		50 * time.Millisecond,
 	}
-	p50, p90, p99, maxLat = stress.LatencyPercentiles(lats)
+	p50, p90, p99, maxLat = LatencyPercentiles(lats)
 	assert.Equal(t, 30*time.Millisecond, p50)
 	assert.Equal(t, 50*time.Millisecond, p90)
 	assert.Equal(t, 50*time.Millisecond, p99)
@@ -188,7 +186,7 @@ func TestMetricsPercentiles(t *testing.T) {
 }
 
 func TestMetricsRecordingAndReporting(t *testing.T) {
-	m := stress.NewMetrics()
+	m := NewMetrics()
 	m.Record("create_root", http.StatusCreated, 15*time.Millisecond, nil)
 	m.Record("create_reply", http.StatusCreated, 10*time.Millisecond, nil)
 	m.Record("edit", http.StatusOK, 5*time.Millisecond, nil)
@@ -237,7 +235,7 @@ func TestPressureController(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := stress.Config{
+	cfg := Config{
 		TargetURL:      server.URL,
 		Users:          3,
 		RPS:            50,
@@ -252,9 +250,9 @@ func TestPressureController(t *testing.T) {
 		ReadWeight:     25,
 	}
 
-	pool := stress.NewInteractionPool(100)
-	metrics := stress.NewMetrics()
-	controller := stress.NewPressureController(cfg, pool, metrics)
+	pool := NewInteractionPool(100)
+	metrics := NewMetrics()
+	controller := NewPressureController(cfg, pool, metrics)
 
 	var buf bytes.Buffer
 	err := controller.Run(context.Background(), &buf)

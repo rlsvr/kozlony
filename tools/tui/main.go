@@ -12,12 +12,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/rlsvr/kozlony/internal/stress"
+	"github.com/rlsvr/kozlony/tools/status"
 )
 
 func main() {
 	var (
-		statusFile  = flag.String("status", stress.DefaultStatusFilePath, "Path to stress runner live status JSON file")
+		statusFile  = flag.String("status", status.DefaultStatusFilePath, "Path to stress runner live status JSON file")
 		targetURL   = flag.String("url", "http://localhost:8080", "Base URL of the Kozlony API for display")
 		kozlonyPID  = flag.Int("pid", 0, "PID of Kozlony server (0 for auto-detect)")
 		databaseURL = flag.String("db", "", "PostgreSQL connection string (defaults to local docker port 5433)")

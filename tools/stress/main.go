@@ -6,12 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/rlsvr/kozlony/internal/stress"
 )
 
 func main() {
-	cfg, err := stress.ParseFlags(os.Args[1:])
+	cfg, err := ParseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
@@ -53,8 +51,8 @@ func main() {
 		}
 	}
 
-	pool := stress.NewInteractionPool(10000)
-	metrics := stress.NewMetrics()
+	pool := NewInteractionPool(10000)
+	metrics := NewMetrics()
 
 	// Seed pool with existing interactions if available
 	fmt.Print("Seeding interaction pool from feed... ")
@@ -64,7 +62,7 @@ func main() {
 		fmt.Printf("done (%d items loaded)\n", pool.Size())
 	}
 
-	controller := stress.NewPressureController(cfg, pool, metrics)
+	controller := NewPressureController(cfg, pool, metrics)
 
 	fmt.Println("Starting workload generator...")
 	if err := controller.Run(ctx, os.Stdout); err != nil && ctx.Err() == nil {

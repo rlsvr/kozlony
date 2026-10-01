@@ -1,4 +1,4 @@
-package stress
+package main
 
 import (
 	"bytes"
@@ -18,6 +18,8 @@ import (
 	"github.com/rlsvr/hirnok/pkg/queue"
 	"github.com/rlsvr/hirnok/pkg/worker"
 	"golang.org/x/time/rate"
+
+	"github.com/rlsvr/kozlony/tools/status"
 )
 
 // PressureController orchestrates simulated user traffic using a bounded worker pool.
@@ -50,10 +52,9 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 		MaxIdleConnsPerHost: poolWorkers * 2,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
-		DisableCompression:  true,
 	}
 
-	client := &http.Client{
+	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   10 * time.Second,
 	}
@@ -63,24 +64,40 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 		pool:       pool,
 		metrics:    metrics,
 		limiter:    limiter,
-		httpClient: client,
+		httpClient: httpClient,
 	}
 }
 
 // Run starts the stress test using a fixed worker pool from hirnok and blocks until completion.
 func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 	runCtx := ctx
-	var cancel context.CancelFunc
 	if c.cfg.Duration > 0 {
+		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(ctx, c.cfg.Duration)
 		defer cancel()
 	}
 
-	// Live status line reporter goroutine
+	// Publish initial active runner status for external observers (e.g. TUI monitor)
+	_ = status.SaveRunnerStatus(status.DefaultStatusFilePath, status.RunnerStatus{
+		Active:    true,
+		PID:       os.Getpid(),
+		TargetURL: c.cfg.TargetURL,
+		Users:     c.cfg.Users,
+		TargetRPS: c.cfg.RPS,
+		PoolSize:  c.pool.Size(),
+		UpdatedAt: time.Now(),
+		Snapshot:  c.metrics.Snapshot(),
+	})
+
+	// Periodic progress reporter goroutine
 	reporterDone := make(chan struct{})
 	go func() {
 		defer close(reporterDone)
-		ticker := time.NewTicker(c.cfg.ReportInterval)
+		interval := c.cfg.ReportInterval
+		if interval <= 0 {
+			interval = 1 * time.Second
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
@@ -89,7 +106,7 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 				return
 			case <-ticker.C:
 				snap := c.metrics.PrintLive(out, c.pool.Size())
-				_ = SaveRunnerStatus(DefaultStatusFilePath, RunnerStatus{
+				_ = status.SaveRunnerStatus(status.DefaultStatusFilePath, status.RunnerStatus{
 					Active:    true,
 					PID:       os.Getpid(),
 					TargetURL: c.cfg.TargetURL,
@@ -176,7 +193,7 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 	_ = wPool.Wait(ctx)
 	<-reporterDone
 
-	_ = SaveRunnerStatus(DefaultStatusFilePath, RunnerStatus{
+	_ = status.SaveRunnerStatus(status.DefaultStatusFilePath, status.RunnerStatus{
 		Active:    false,
 		PID:       os.Getpid(),
 		TargetURL: c.cfg.TargetURL,
@@ -298,7 +315,7 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 	data, _ := json.Marshal(payload)
 	reqURL := fmt.Sprintf("%s/v1/interactions", c.cfg.TargetURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(data)) //nolint:gosec // Load generator target URL
 	if err != nil {
 		c.metrics.Record(action, 0, 0, err)
 		return
@@ -307,7 +324,7 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 	req.Header.Set("Idempotency-Key", uuid.New().String())
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
 	lat := time.Since(start)
 
 	if err != nil {
@@ -359,7 +376,7 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	data, _ := json.Marshal(payload)
 	reqURL := fmt.Sprintf("%s/v1/interactions/%s", c.cfg.TargetURL, item.ID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data)) //nolint:gosec // Load generator target URL
 	if err != nil {
 		c.metrics.Record("edit", 0, 0, err)
 		return
@@ -367,7 +384,7 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	req.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
 	lat := time.Since(start)
 
 	if err != nil {
@@ -398,14 +415,14 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 		reqURL = fmt.Sprintf("%s/v1/interactions?group_id=%s&limit=25", c.cfg.TargetURL, c.cfg.GroupID)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil) //nolint:gosec // Load generator target URL
 	if err != nil {
 		c.metrics.Record(action, 0, 0, err)
 		return
 	}
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
 	lat := time.Since(start)
 
 	if err != nil {

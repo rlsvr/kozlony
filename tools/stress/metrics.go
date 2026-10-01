@@ -1,18 +1,15 @@
-package stress
+package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-// DefaultStatusFilePath is the standard temporary location where stress runners publish live telemetry.
-const DefaultStatusFilePath = "/tmp/kozlony-stress-status.json"
+	"github.com/rlsvr/kozlony/tools/status"
+)
 
 // Metrics collects real-time performance and error telemetry during stress testing.
 type Metrics struct {
@@ -114,7 +111,7 @@ func LatencyPercentiles(lats []time.Duration) (time.Duration, time.Duration, tim
 }
 
 // PrintLive outputs a single progress status line similar to runner CLI and returns the snapshot.
-func (m *Metrics) PrintLive(w io.Writer, poolSize int) Snapshot {
+func (m *Metrics) PrintLive(w io.Writer, poolSize int) status.Snapshot {
 	snap := m.Snapshot()
 	mins := int(snap.Elapsed.Minutes())
 	secs := int(snap.Elapsed.Seconds()) % 60
@@ -201,29 +198,8 @@ func percent(part, total int64) float64 {
 	return (float64(part) / float64(total)) * 100.0
 }
 
-// Snapshot holds a point-in-time metrics state suitable for rendering in dashboards and TUIs.
-type Snapshot struct {
-	StartTime       time.Time
-	Elapsed         time.Duration
-	TotalRequests   int64
-	SuccessRequests int64
-	ErrorRequests   int64
-	IntervalRPS     float64
-	OverallRPS      float64
-	IntervalP50     time.Duration
-	IntervalP90     time.Duration
-	IntervalP99     time.Duration
-	IntervalMax     time.Duration
-	AllP50          time.Duration
-	AllP90          time.Duration
-	AllP99          time.Duration
-	AllMax          time.Duration
-	ActionCounts    map[string]int64
-	StatusCodes     map[int]int64
-}
-
 // Snapshot captures the current metrics values and resets the interval counters.
-func (m *Metrics) Snapshot() Snapshot {
+func (m *Metrics) Snapshot() status.Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -262,7 +238,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	m.intervalError = 0
 	m.intervalLats = m.intervalLats[:0]
 
-	return Snapshot{
+	return status.Snapshot{
 		StartTime:       m.startTime,
 		Elapsed:         elapsed,
 		TotalRequests:   totalReqs,
@@ -306,43 +282,4 @@ func (m *Metrics) Reset() {
 	m.intervalSuccess = 0
 	m.intervalError = 0
 	m.intervalLats = m.intervalLats[:0]
-}
-
-// RunnerStatus represents the overall live state of an external stress test runner.
-type RunnerStatus struct {
-	Active    bool      `json:"active"`
-	PID       int       `json:"pid"`
-	TargetURL string    `json:"target_url"`
-	Users     int       `json:"users"`
-	TargetRPS float64   `json:"target_rps"`
-	PoolSize  int       `json:"pool_size"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Snapshot  Snapshot  `json:"snapshot"`
-}
-
-// SaveRunnerStatus writes the current runner status to disk as atomic JSON.
-func SaveRunnerStatus(path string, status RunnerStatus) error {
-	data, err := json.MarshalIndent(status, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmpFile := path + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpFile, path)
-}
-
-// LoadRunnerStatus reads the runner status from disk.
-func LoadRunnerStatus(path string) (RunnerStatus, error) {
-	var status RunnerStatus
-	//nolint:gosec // Status path is a known status file
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return status, err
-	}
-	if err := json.Unmarshal(data, &status); err != nil {
-		return status, err
-	}
-	return status, nil
 }
