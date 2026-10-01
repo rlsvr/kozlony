@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -75,7 +76,17 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 			case <-runCtx.Done():
 				return
 			case <-ticker.C:
-				c.metrics.PrintLive(out, c.pool.Size())
+				snap := c.metrics.PrintLive(out, c.pool.Size())
+				_ = SaveRunnerStatus(DefaultStatusFilePath, RunnerStatus{
+					Active:    true,
+					PID:       os.Getpid(),
+					TargetURL: c.cfg.TargetURL,
+					Users:     c.cfg.Users,
+					TargetRPS: c.cfg.RPS,
+					PoolSize:  c.pool.Size(),
+					UpdatedAt: time.Now(),
+					Snapshot:  snap,
+				})
 			}
 		}
 	}()
@@ -93,6 +104,17 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 
 	wg.Wait()
 	<-reporterDone
+
+	_ = SaveRunnerStatus(DefaultStatusFilePath, RunnerStatus{
+		Active:    false,
+		PID:       os.Getpid(),
+		TargetURL: c.cfg.TargetURL,
+		Users:     c.cfg.Users,
+		TargetRPS: c.cfg.RPS,
+		PoolSize:  c.pool.Size(),
+		UpdatedAt: time.Now(),
+		Snapshot:  c.metrics.Snapshot(),
+	})
 
 	c.metrics.PrintSummary(out, c.pool.Size())
 	return nil

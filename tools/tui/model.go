@@ -22,38 +22,51 @@ type Model struct {
 	sampler     *Sampler
 	sysSnap     SystemSnapshot
 
-	startTime time.Time
-	paused    bool
-	width     int
-	height    int
+	startTime       time.Time
+	embeddedRunning bool
+	externalActive  bool
+	externalRunner  stress.RunnerStatus
+
+	width  int
+	height int
 
 	runCtx    context.Context
 	runCancel context.CancelFunc
 }
 
 // NewModel creates an initial TUI model.
-func NewModel(cfg stress.Config, pool *stress.InteractionPool, metrics *stress.Metrics, sampler *Sampler) Model {
+func NewModel(cfg stress.Config, pool *stress.InteractionPool, metrics *stress.Metrics, sampler *Sampler, startEmbedded bool) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := Model{
-		cfg:         cfg,
-		pool:        pool,
-		metrics:     metrics,
-		metricsSnap: metrics.Snapshot(),
-		sampler:     sampler,
-		startTime:   time.Now(),
-		paused:      false,
-		width:       100,
-		height:      35,
-		runCtx:      ctx,
-		runCancel:   cancel,
+		cfg:             cfg,
+		pool:            pool,
+		metrics:         metrics,
+		metricsSnap:     metrics.Snapshot(),
+		sampler:         sampler,
+		startTime:       time.Now(),
+		embeddedRunning: startEmbedded,
+		width:           100,
+		height:          35,
+		runCtx:          ctx,
+		runCancel:       cancel,
 	}
 
-	m.startWorkload()
+	// Check if an external runner is already active at startup
+	extStatus, err := stress.LoadRunnerStatus(stress.DefaultStatusFilePath)
+	if err == nil && extStatus.Active && time.Since(extStatus.UpdatedAt) < 4*time.Second {
+		m.externalActive = true
+		m.externalRunner = extStatus
+		m.metricsSnap = extStatus.Snapshot
+	} else if startEmbedded {
+		m.startWorkload()
+	}
+
 	return m
 }
 
 func (m *Model) startWorkload() {
 	controller := stress.NewPressureController(m.cfg, m.pool, m.metrics)
+	m.embeddedRunning = true
 	go func() {
 		_ = controller.Run(m.runCtx, io.Discard)
 	}()
@@ -81,21 +94,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case " ":
-			// Toggle pause/resume
-			m.paused = !m.paused
-			if m.paused {
-				if m.runCancel != nil {
-					m.runCancel()
+			// Toggle embedded load generation if no external runner is active
+			if !m.externalActive {
+				if m.embeddedRunning {
+					m.embeddedRunning = false
+					if m.runCancel != nil {
+						m.runCancel()
+					}
+				} else {
+					m.runCtx, m.runCancel = context.WithCancel(context.Background())
+					m.startWorkload()
 				}
-			} else {
-				m.runCtx, m.runCancel = context.WithCancel(context.Background())
-				m.startWorkload()
 			}
 
 		case "+", "=":
 			m.cfg.RPS += 50
-			// Restart workload with new RPS ceiling if active
-			if !m.paused {
+			if m.embeddedRunning {
 				if m.runCancel != nil {
 					m.runCancel()
 				}
@@ -106,7 +120,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "-", "_":
 			if m.cfg.RPS > 50 {
 				m.cfg.RPS -= 50
-				if !m.paused {
+				if m.embeddedRunning {
 					if m.runCancel != nil {
 						m.runCancel()
 					}
@@ -116,8 +130,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "c":
-			// Clear metrics
-			m.metrics = stress.NewMetrics()
+			// In-place reset preserves pointer so background workers continue updating
+			m.metrics.Reset()
 			m.metricsSnap = m.metrics.Snapshot()
 		}
 
@@ -126,18 +140,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		if m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration {
-			m.paused = true
+		if m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration && m.embeddedRunning {
+			m.embeddedRunning = false
 			if m.runCancel != nil {
 				m.runCancel()
 			}
 		}
 
-		// Sample metrics and system state
-		m.metricsSnap = m.metrics.Snapshot()
+		// Check for active external stress test runner
+		extStatus, err := stress.LoadRunnerStatus(stress.DefaultStatusFilePath)
+		if err == nil && extStatus.Active && time.Since(extStatus.UpdatedAt) < 4*time.Second {
+			m.externalActive = true
+			m.externalRunner = extStatus
+			m.metricsSnap = extStatus.Snapshot
+		} else {
+			m.externalActive = false
+			if m.embeddedRunning {
+				m.metricsSnap = m.metrics.Snapshot()
+			}
+		}
+
+		// Sample system and database state
 		if m.sampler != nil {
 			m.sysSnap = m.sampler.Sample(context.Background())
 		}
+
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})

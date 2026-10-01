@@ -74,15 +74,26 @@ func renderHeader(m Model) string {
 	title := styleTitle.Render("⚡ KOZLONY TUI LOAD & STACK MONITOR")
 	clock := styleMuted.Render(time.Now().Format("15:04:05"))
 
-	statusPill := stylePillActive.Render("● ACTIVE")
-	if m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration {
+	var statusPill string
+	switch {
+	case m.externalActive:
+		statusPill = stylePillActive.Render(fmt.Sprintf("● RUNNER ACTIVE (PID %d)", m.externalRunner.PID))
+	case m.embeddedRunning:
+		statusPill = stylePillActive.Render("● EMBEDDED LOAD ACTIVE")
+	case m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration:
 		statusPill = stylePillPaused.Render("✔ COMPLETED")
-	} else if m.paused {
-		statusPill = stylePillPaused.Render("⏸ PAUSED")
+	default:
+		statusPill = stylePillPaused.Render("⏸ STANDBY (PRESS [SPACE] OR RUN STRESS)")
 	}
 
-	info := fmt.Sprintf("target: %s | users: %d | rps: %.0f | pool: %d",
-		m.cfg.TargetURL, m.cfg.Users, m.cfg.RPS, m.pool.Size())
+	var info string
+	if m.externalActive {
+		info = fmt.Sprintf("target: %s | users: %d | rps: %.0f | pool: %d",
+			m.externalRunner.TargetURL, m.externalRunner.Users, m.externalRunner.TargetRPS, m.pool.Size())
+	} else {
+		info = fmt.Sprintf("target: %s | users: %d | rps: %.0f | pool: %d",
+			m.cfg.TargetURL, m.cfg.Users, m.cfg.RPS, m.pool.Size())
+	}
 	infoStyled := styleMuted.Render(info)
 
 	topLine := lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", clock, "  ", statusPill, "  ", infoStyled)
@@ -92,7 +103,15 @@ func renderHeader(m Model) string {
 func renderWorkloadCard(m Model, cardWidth int) string {
 	snap := m.metricsSnap
 
-	cardTitle := styleCardTitle.Render("WORKLOAD & THROUGHPUT")
+	cardTitleText := "WORKLOAD & THROUGHPUT"
+	if m.externalActive {
+		cardTitleText += " (EXTERNAL STRESS RUNNER)"
+	} else if m.embeddedRunning {
+		cardTitleText += " (EMBEDDED WORKLOAD GENERATOR)"
+	} else {
+		cardTitleText += " (STANDBY - PRESS [SPACE] TO START EMBEDDED LOAD)"
+	}
+	cardTitle := styleCardTitle.Render(cardTitleText)
 
 	// Throughput & summary line
 	rpsColor := styleOK

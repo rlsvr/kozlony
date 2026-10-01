@@ -26,6 +26,7 @@ func main() {
 		groupID     = flag.String("group", "root", "Target board/group ID")
 		kozlonyPID  = flag.Int("pid", 0, "PID of Kozlony server (0 for auto-detect)")
 		databaseURL = flag.String("db", "", "PostgreSQL connection string (defaults to local docker port 5433)")
+		loadGen     = flag.Bool("load", false, "Start embedded load generator (default false to monitor external stress test)")
 	)
 	flag.Parse()
 
@@ -77,7 +78,7 @@ func main() {
 	metrics := stress.NewMetrics()
 	sampler := NewSampler(detectedPID, dbConn)
 
-	model := NewModel(cfg, pool, metrics, sampler)
+	model := NewModel(cfg, pool, metrics, sampler, *loadGen)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := prog.Run(); err != nil {

@@ -1,13 +1,18 @@
 package stress
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// DefaultStatusFilePath is the standard temporary location where stress runners publish live telemetry.
+const DefaultStatusFilePath = "/tmp/kozlony-stress-status.json"
 
 // Metrics collects real-time performance and error telemetry during stress testing.
 type Metrics struct {
@@ -108,43 +113,23 @@ func LatencyPercentiles(lats []time.Duration) (time.Duration, time.Duration, tim
 	return p50, p90, p99, maxLat
 }
 
-// PrintLive outputs a single progress status line similar to runner CLI.
-func (m *Metrics) PrintLive(w io.Writer, poolSize int) {
-	m.mu.Lock()
-	now := time.Now()
-	elapsedTotal := now.Sub(m.startTime).Truncate(time.Second)
-	intervalDuration := now.Sub(m.lastReportTime).Seconds()
-	if intervalDuration <= 0 {
-		intervalDuration = 1.0
-	}
-
-	intervalRPS := float64(m.intervalTotal) / intervalDuration
-	p50, p90, p99, maxLat := LatencyPercentiles(m.intervalLats)
-
-	totalOk := m.successRequests.Load()
-	totalErr := m.errorRequests.Load()
-
-	// Reset interval
-	m.lastReportTime = now
-	m.intervalTotal = 0
-	m.intervalSuccess = 0
-	m.intervalError = 0
-	m.intervalLats = m.intervalLats[:0]
-	m.mu.Unlock()
-
-	mins := int(elapsedTotal.Minutes())
-	secs := int(elapsedTotal.Seconds()) % 60
+// PrintLive outputs a single progress status line similar to runner CLI and returns the snapshot.
+func (m *Metrics) PrintLive(w io.Writer, poolSize int) Snapshot {
+	snap := m.Snapshot()
+	mins := int(snap.Elapsed.Minutes())
+	secs := int(snap.Elapsed.Seconds()) % 60
 
 	_, _ = fmt.Fprintf(w, "[%02d:%02d] rps=%6.1f | ok=%-7d err=%-5d | p50=%-7s p90=%-7s p99=%-7s max=%-7s | pool=%-5d\n",
 		mins, secs,
-		intervalRPS,
-		totalOk, totalErr,
-		p50.Truncate(100*time.Microsecond),
-		p90.Truncate(100*time.Microsecond),
-		p99.Truncate(100*time.Microsecond),
-		maxLat.Truncate(100*time.Microsecond),
+		snap.IntervalRPS,
+		snap.SuccessRequests, snap.ErrorRequests,
+		snap.IntervalP50.Truncate(100*time.Microsecond),
+		snap.IntervalP90.Truncate(100*time.Microsecond),
+		snap.IntervalP99.Truncate(100*time.Microsecond),
+		snap.IntervalMax.Truncate(100*time.Microsecond),
 		poolSize,
 	)
+	return snap
 }
 
 // PrintSummary outputs a detailed final report after the test run finishes.
@@ -296,4 +281,68 @@ func (m *Metrics) Snapshot() Snapshot {
 		ActionCounts:    actions,
 		StatusCodes:     codes,
 	}
+}
+
+// Reset clears all counters and latency samples in-place, keeping the instance pointer valid.
+func (m *Metrics) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	m.startTime = now
+	m.lastReportTime = now
+
+	m.totalRequests.Store(0)
+	m.successRequests.Store(0)
+	m.errorRequests.Store(0)
+
+	m.statusCodes = make(map[int]int64)
+	m.actionCounts = make(map[string]int64)
+	m.errorsByType = make(map[string]int64)
+
+	m.allLatencies = m.allLatencies[:0]
+
+	m.intervalTotal = 0
+	m.intervalSuccess = 0
+	m.intervalError = 0
+	m.intervalLats = m.intervalLats[:0]
+}
+
+// RunnerStatus represents the overall live state of an external stress test runner.
+type RunnerStatus struct {
+	Active    bool      `json:"active"`
+	PID       int       `json:"pid"`
+	TargetURL string    `json:"target_url"`
+	Users     int       `json:"users"`
+	TargetRPS float64   `json:"target_rps"`
+	PoolSize  int       `json:"pool_size"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Snapshot  Snapshot  `json:"snapshot"`
+}
+
+// SaveRunnerStatus writes the current runner status to disk as atomic JSON.
+func SaveRunnerStatus(path string, status RunnerStatus) error {
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpFile := path + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, path)
+}
+
+// LoadRunnerStatus reads the runner status from disk.
+func LoadRunnerStatus(path string) (RunnerStatus, error) {
+	var status RunnerStatus
+	//nolint:gosec // Status path is a known status file
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return status, err
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return status, err
+	}
+	return status, nil
 }
