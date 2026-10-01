@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/rlsvr/kozlony/internal/stress"
 )
@@ -23,36 +22,24 @@ func main() {
 
 	fmt.Println("=== Kozlony Stress Test & Workload Generator ===")
 	fmt.Printf("Target URL:       %s\n", cfg.TargetURL)
-	fmt.Printf("Concurrent Users: %d\n", cfg.Users)
+	fmt.Printf("Simulated Users:  %d distinct user accounts\n", cfg.Users)
+	fmt.Printf("Worker Pool:      %d concurrent workers (hirnok/pkg/worker)\n", cfg.Workers)
 	if cfg.RPS > 0 {
-		fmt.Printf("Max RPS Ceiling:  %.1f req/s\n", cfg.RPS)
+		fmt.Printf("Target RPS:       %.1f req/s\n", cfg.RPS)
 	} else {
-		fmt.Printf("Max RPS Ceiling:  unconstrained\n")
+		fmt.Printf("Target RPS:       unconstrained (maximum throughput)\n")
 	}
-	fmt.Printf("Think Time:       %v - %v\n", cfg.MinThink, cfg.MaxThink)
+	if cfg.MinThink > 0 || cfg.MaxThink > 0 {
+		fmt.Printf("Think Time:       %v - %v\n", cfg.MinThink, cfg.MaxThink)
+	} else {
+		fmt.Printf("Think Time:       0s (immediate execution)\n")
+	}
 	if cfg.Duration > 0 {
 		fmt.Printf("Duration:         %v\n", cfg.Duration)
 	} else {
 		fmt.Printf("Duration:         indefinite (press Ctrl+C to stop)\n")
 	}
 	fmt.Printf("Group ID:         %s\n", cfg.GroupID)
-
-	avgThink := (cfg.MinThink + cfg.MaxThink) / 2
-	if cfg.RPS > 0 && avgThink > 0 {
-		cycleTime := avgThink + time.Millisecond
-		maxPossibleRPS := float64(cfg.Users) / cycleTime.Seconds()
-		if maxPossibleRPS < cfg.RPS*0.85 {
-			fmt.Println("------------------------------------------------")
-			fmt.Printf("⚠️  NOTE: With %d users and %v avg think time, client max theoretical throughput is ~%.0f req/s.\n",
-				cfg.Users, avgThink, maxPossibleRPS)
-			suggestedUsers := int(cfg.RPS/500) + 50
-			if suggestedUsers < 100 {
-				suggestedUsers = 100
-			}
-			fmt.Printf("   To achieve requested %.0f req/s, pass: -min-think 0s -max-think 0s -users %d\n",
-				cfg.RPS, suggestedUsers)
-		}
-	}
 	fmt.Println("================================================")
 
 	pool := stress.NewInteractionPool(10000)

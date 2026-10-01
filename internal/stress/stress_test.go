@@ -32,6 +32,14 @@ func TestConfigValidation(t *testing.T) {
 	invalidUsers.Users = 0
 	require.Error(t, invalidUsers.Validate())
 
+	invalidWorkers := cfg
+	invalidWorkers.Workers = 0
+	require.Error(t, invalidWorkers.Validate())
+
+	tooManyWorkers := cfg
+	tooManyWorkers.Workers = stress.MaxAllowedWorkers + 1
+	require.Error(t, tooManyWorkers.Validate())
+
 	invalidThink := cfg
 	invalidThink.MinThink = 5 * time.Second
 	invalidThink.MaxThink = 1 * time.Second
@@ -52,7 +60,8 @@ func TestConfigValidation(t *testing.T) {
 func TestParseFlags(t *testing.T) {
 	args := []string{
 		"-url", "http://test-server:9090",
-		"-users", "15",
+		"-users", "1000000",
+		"-workers", "150",
 		"-rps", "45.5",
 		"-min-think", "500ms",
 		"-max-think", "1500ms",
@@ -63,7 +72,8 @@ func TestParseFlags(t *testing.T) {
 	cfg, err := stress.ParseFlags(args)
 	require.NoError(t, err)
 	assert.Equal(t, "http://test-server:9090", cfg.TargetURL)
-	assert.Equal(t, 15, cfg.Users)
+	assert.Equal(t, 1000000, cfg.Users)
+	assert.Equal(t, 150, cfg.Workers)
 	assert.InDelta(t, 45.5, cfg.RPS, 0.001)
 	assert.Equal(t, 500*time.Millisecond, cfg.MinThink)
 	assert.Equal(t, 1500*time.Millisecond, cfg.MaxThink)

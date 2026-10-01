@@ -7,14 +7,18 @@ import (
 	"time"
 )
 
+// MaxAllowedWorkers is the upper limit for concurrent execution worker goroutines to prevent OS socket exhaustion.
+const MaxAllowedWorkers = 2000
+
 // Config defines the runtime configuration for the load generator and pressure controller.
 type Config struct {
 	TargetURL      string
-	Users          int
-	RPS            float64
-	MinThink       time.Duration
-	MaxThink       time.Duration
-	Duration       time.Duration
+	Users          int           // Population size of simulated users
+	Workers        int           // Execution worker pool concurrency
+	RPS            float64       // Target requests per second ceiling (0 for unconstrained)
+	MinThink       time.Duration // Minimum think time between actions
+	MaxThink       time.Duration // Maximum think time between actions
+	Duration       time.Duration // Total test duration (0 for indefinite)
 	GroupID        string
 	ReportInterval time.Duration
 	RootWeight     int
@@ -27,10 +31,11 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		TargetURL:      "http://localhost:8080",
-		Users:          20,
+		Users:          1000,
+		Workers:        200,
 		RPS:            0,
-		MinThink:       1 * time.Second,
-		MaxThink:       3 * time.Second,
+		MinThink:       0,
+		MaxThink:       0,
 		Duration:       0,
 		GroupID:        "root",
 		ReportInterval: 1 * time.Second,
@@ -47,10 +52,11 @@ func ParseFlags(args []string) (Config, error) {
 	fs := flag.NewFlagSet("stresstest", flag.ContinueOnError)
 
 	fs.StringVar(&cfg.TargetURL, "url", cfg.TargetURL, "Base URL of the Kozlony API")
-	fs.IntVar(&cfg.Users, "users", cfg.Users, "Number of concurrent simulated users")
+	fs.IntVar(&cfg.Users, "users", cfg.Users, "Simulated user identity population size (e.g. 1000000)")
+	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "Execution worker pool concurrency (default: 200, max: 2000)")
 	fs.Float64Var(&cfg.RPS, "rps", cfg.RPS, "Global max requests per second ceiling (0 for unconstrained)")
-	fs.DurationVar(&cfg.MinThink, "min-think", cfg.MinThink, "Minimum think time between actions per user")
-	fs.DurationVar(&cfg.MaxThink, "max-think", cfg.MaxThink, "Maximum think time between actions per user")
+	fs.DurationVar(&cfg.MinThink, "min-think", cfg.MinThink, "Minimum think time between actions")
+	fs.DurationVar(&cfg.MaxThink, "max-think", cfg.MaxThink, "Maximum think time between actions")
 	fs.DurationVar(&cfg.Duration, "duration", cfg.Duration, "Total test duration (0 for indefinite until SIGINT)")
 	fs.StringVar(&cfg.GroupID, "group", cfg.GroupID, "Target board/group ID")
 	fs.DurationVar(&cfg.ReportInterval, "report-interval", cfg.ReportInterval, "Interval between live terminal progress updates")
@@ -76,7 +82,13 @@ func (c *Config) Validate() error {
 		return errors.New("target URL cannot be empty")
 	}
 	if c.Users <= 0 {
-		return errors.New("users must be greater than 0")
+		return errors.New("users population must be greater than 0")
+	}
+	if c.Workers <= 0 {
+		return errors.New("workers must be greater than 0")
+	}
+	if c.Workers > MaxAllowedWorkers {
+		return fmt.Errorf("workers (%d) exceeds safe execution pool limit of %d to protect OS resources", c.Workers, MaxAllowedWorkers)
 	}
 	if c.MinThink < 0 || c.MaxThink < 0 {
 		return errors.New("think times must be non-negative")

@@ -11,13 +11,16 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rlsvr/hirnok/pkg/queue"
+	"github.com/rlsvr/hirnok/pkg/worker"
 	"golang.org/x/time/rate"
 )
 
-// PressureController orchestrates concurrent simulated users generating load against Kozlony.
+// PressureController orchestrates simulated user traffic using a bounded worker pool.
 type PressureController struct {
 	cfg        Config
 	pool       *InteractionPool
@@ -28,17 +31,26 @@ type PressureController struct {
 
 // NewPressureController creates a load generator controller.
 func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) *PressureController {
+	poolWorkers := cfg.Workers
+	if poolWorkers <= 0 {
+		poolWorkers = 200
+	}
+
 	var limiter *rate.Limiter
 	if cfg.RPS > 0 {
-		burst := int(math.Ceil(cfg.RPS*1.5)) + 1
+		burst := int(math.Ceil(cfg.RPS*0.2)) + poolWorkers
+		if burst < 100 {
+			burst = 100
+		}
 		limiter = rate.NewLimiter(rate.Limit(cfg.RPS), burst)
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        cfg.Users * 4,
-		MaxIdleConnsPerHost: cfg.Users * 4,
+		MaxIdleConns:        poolWorkers * 2,
+		MaxIdleConnsPerHost: poolWorkers * 2,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
+		DisableCompression:  true,
 	}
 
 	client := &http.Client{
@@ -55,7 +67,7 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 	}
 }
 
-// Run starts the stress test and blocks until the duration expires or ctx is cancelled.
+// Run starts the stress test using a fixed worker pool from hirnok and blocks until completion.
 func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -91,18 +103,77 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 		}
 	}()
 
-	// Launch worker goroutines
-	var wg sync.WaitGroup
-	wg.Add(c.cfg.Users)
-	for i := 1; i <= c.cfg.Users; i++ {
-		workerID := i
-		go func() {
-			defer wg.Done()
-			c.workerLoop(runCtx, workerID)
-		}()
+	numWorkers := c.cfg.Workers
+	if numWorkers <= 0 {
+		numWorkers = 200
 	}
 
-	wg.Wait()
+	qCapacity := numWorkers * 4
+	if qCapacity < 1000 {
+		qCapacity = 1000
+	}
+	q := queue.New[struct{}](qCapacity)
+
+	var workerSeq atomic.Int64
+	wPool := worker.Run(runCtx, numWorkers, q, func(workerCtx context.Context, _ struct{}) {
+		id := workerSeq.Add(1)
+		rng := rand.New(rand.NewSource(time.Now().UnixNano() + id*1000)) //nolint:gosec
+		author := fmt.Sprintf("user-%05d", rng.Intn(c.cfg.Users)+1)
+		action := c.selectAction(rng)
+		c.executeAction(workerCtx, rng, author, action)
+
+		if c.cfg.MaxThink > 0 {
+			var think time.Duration
+			if c.cfg.MaxThink > c.cfg.MinThink {
+				think = c.cfg.MinThink + time.Duration(rng.Int63n(int64(c.cfg.MaxThink-c.cfg.MinThink)))
+			} else {
+				think = c.cfg.MinThink
+			}
+			select {
+			case <-workerCtx.Done():
+			case <-time.After(think):
+			}
+		}
+	})
+
+	// Dispatcher goroutine: feeds the bounded queue according to RPS or unconstrained
+	var dispatchWg sync.WaitGroup
+	dispatchWg.Add(1)
+	go func() {
+		defer dispatchWg.Done()
+		defer q.Close()
+
+		if c.limiter != nil {
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				default:
+				}
+				if err := c.limiter.Wait(runCtx); err != nil {
+					return
+				}
+				if err := q.Push(runCtx, struct{}{}); err != nil {
+					return
+				}
+			}
+		} else {
+			// Unconstrained mode: push whenever queue has capacity
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				default:
+				}
+				if err := q.Push(runCtx, struct{}{}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	dispatchWg.Wait()
+	_ = wPool.Wait(ctx)
 	<-reporterDone
 
 	_ = SaveRunnerStatus(DefaultStatusFilePath, RunnerStatus{
@@ -118,45 +189,6 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 
 	c.metrics.PrintSummary(out, c.pool.Size())
 	return nil
-}
-
-func (c *PressureController) workerLoop(ctx context.Context, workerID int) {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)*1000)) //nolint:gosec
-	author := fmt.Sprintf("user-%03d", workerID)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		if c.limiter != nil {
-			if err := c.limiter.Wait(ctx); err != nil {
-				return
-			}
-		}
-
-		action := c.selectAction(rng)
-		c.executeAction(ctx, rng, author, action)
-
-		// Think time jitter between actions
-		if c.cfg.MaxThink > 0 {
-			var think time.Duration
-			if c.cfg.MaxThink > c.cfg.MinThink {
-				delta := c.cfg.MaxThink - c.cfg.MinThink
-				think = c.cfg.MinThink + time.Duration(rng.Int63n(int64(delta)))
-			} else {
-				think = c.cfg.MinThink
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(think):
-			}
-		}
-	}
 }
 
 type actionType string
@@ -254,6 +286,9 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 	lat := time.Since(start)
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		c.metrics.Record(action, 0, lat, err)
 		return
 	}
@@ -310,6 +345,9 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	lat := time.Since(start)
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		c.metrics.Record("edit", 0, lat, err)
 		return
 	}
@@ -345,6 +383,9 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 	lat := time.Since(start)
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		c.metrics.Record(action, 0, lat, err)
 		return
 	}
