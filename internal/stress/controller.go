@@ -241,12 +241,36 @@ func (c *PressureController) executeAction(ctx context.Context, rng *rand.Rand, 
 	}
 }
 
+func (c *PressureController) generateBody(rng *rand.Rand, prefix string) string {
+	targetLen := c.cfg.MinBody
+	if c.cfg.MaxBody > c.cfg.MinBody {
+		targetLen = c.cfg.MinBody + rng.Intn(c.cfg.MaxBody-c.cfg.MinBody+1)
+	}
+	// The Kozlony API requires non-empty body (min 1 character)
+	if targetLen < 1 {
+		targetLen = 1
+	}
+
+	if len(prefix) >= targetLen {
+		return prefix[:targetLen]
+	}
+
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+	b := make([]byte, targetLen)
+	copy(b, prefix)
+	for i := len(prefix); i < targetLen; i++ {
+		b[i] = charset[rng.Intn(len(charset))]
+	}
+	return string(b)
+}
+
 func (c *PressureController) doCreateRoot(ctx context.Context, rng *rand.Rand, author string) {
+	prefix := fmt.Sprintf("Root post by %s at %v: ", author, time.Now().Format(time.RFC3339Nano))
 	payload := map[string]any{
 		"group_id": c.cfg.GroupID,
 		"author":   author,
 		"title":    fmt.Sprintf("Stress Post #%d from %s", rng.Intn(100000), author),
-		fieldBody:  fmt.Sprintf("Root discussion content generated at %v with random noise %d", time.Now().Format(time.RFC3339Nano), rng.Int63()),
+		fieldBody:  c.generateBody(rng, prefix),
 	}
 
 	c.sendPostInteraction(ctx, "create_root", payload)
@@ -259,11 +283,12 @@ func (c *PressureController) doCreateReply(ctx context.Context, rng *rand.Rand, 
 		return
 	}
 
+	prefix := fmt.Sprintf("Reply to %s at depth %d by %s (ts: %d): ", parent.ID, parent.Depth+1, author, time.Now().UnixNano())
 	payload := map[string]any{
 		"group_id":  c.cfg.GroupID,
 		"parent_id": parent.ID.String(),
 		"author":    author,
-		fieldBody:   fmt.Sprintf("Reply to %s at depth %d by %s (ts: %d)", parent.ID, parent.Depth+1, author, time.Now().UnixNano()),
+		fieldBody:   c.generateBody(rng, prefix),
 	}
 
 	c.sendPostInteraction(ctx, "create_reply", payload)
@@ -325,8 +350,9 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 		return
 	}
 
+	prefix := fmt.Sprintf("Updated by %s at %v (v%d): ", author, time.Now().Format(time.RFC3339Nano), item.Version)
 	payload := map[string]any{
-		fieldBody: fmt.Sprintf("Updated by %s at %v (v%d)", author, time.Now().Format(time.RFC3339Nano), item.Version),
+		fieldBody: c.generateBody(rng, prefix),
 		"version": item.Version,
 	}
 

@@ -39,6 +39,7 @@ func main() {
 	} else {
 		fmt.Printf("Duration:         indefinite (press Ctrl+C to stop)\n")
 	}
+	fmt.Printf("Body Length:      %d - %d characters\n", cfg.MinBody, cfg.MaxBody)
 	fmt.Printf("Group ID:         %s\n", cfg.GroupID)
 	fmt.Println("================================================")
 

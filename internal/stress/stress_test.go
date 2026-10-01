@@ -45,6 +45,19 @@ func TestConfigValidation(t *testing.T) {
 	invalidThink.MaxThink = 1 * time.Second
 	require.Error(t, invalidThink.Validate())
 
+	invalidBodyNeg := cfg
+	invalidBodyNeg.MinBody = -1
+	require.Error(t, invalidBodyNeg.Validate())
+
+	invalidBodyOrder := cfg
+	invalidBodyOrder.MinBody = 500
+	invalidBodyOrder.MaxBody = 100
+	require.Error(t, invalidBodyOrder.Validate())
+
+	invalidBodyTooLarge := cfg
+	invalidBodyTooLarge.MaxBody = 70000
+	require.Error(t, invalidBodyTooLarge.Validate())
+
 	invalidRPS := cfg
 	invalidRPS.RPS = -10
 	require.Error(t, invalidRPS.Validate())
@@ -65,6 +78,8 @@ func TestParseFlags(t *testing.T) {
 		"-rps", "45.5",
 		"-min-think", "500ms",
 		"-max-think", "1500ms",
+		"-min-body", "50",
+		"-max-body", "500",
 		"-duration", "10s",
 		"-group", "custom-group",
 	}
@@ -77,6 +92,8 @@ func TestParseFlags(t *testing.T) {
 	assert.InDelta(t, 45.5, cfg.RPS, 0.001)
 	assert.Equal(t, 500*time.Millisecond, cfg.MinThink)
 	assert.Equal(t, 1500*time.Millisecond, cfg.MaxThink)
+	assert.Equal(t, 50, cfg.MinBody)
+	assert.Equal(t, 500, cfg.MaxBody)
 	assert.Equal(t, 10*time.Second, cfg.Duration)
 	assert.Equal(t, "custom-group", cfg.GroupID)
 }
