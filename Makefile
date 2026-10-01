@@ -2,7 +2,7 @@ MODULE  := github.com/rlsvr/kozlony
 BINARY  := bin/kozlony
 CMD     := ./cmd/kozlony
 STRESS_BINARY := bin/stresstest
-STRESS_CMD    := ./cmd/stresstest
+STRESS_CMD    := ./tools/stress
 TUI_BINARY    := bin/kozlony-tui
 TUI_CMD       := ./tools/tui
 

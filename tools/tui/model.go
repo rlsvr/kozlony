@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,63 +12,42 @@ import (
 
 type tickMsg time.Time
 
-// Model is the Bubble Tea model managing TUI state, telemetry, and background load.
+// Model is the Bubble Tea model managing pure read-only monitoring state.
 type Model struct {
-	cfg         stress.Config
-	pool        *stress.InteractionPool
-	metrics     *stress.Metrics
-	metricsSnap stress.Snapshot
-	sampler     *Sampler
-	sysSnap     SystemSnapshot
+	statusFile   string
+	targetURL    string
+	sampler      *Sampler
+	sysSnap      SystemSnapshot
+	metricsSnap  stress.Snapshot
+	runnerStatus stress.RunnerStatus
+	runnerActive bool
 
-	startTime       time.Time
-	embeddedRunning bool
-	externalActive  bool
-	externalRunner  stress.RunnerStatus
-
-	width  int
-	height int
-
-	runCtx    context.Context
-	runCancel context.CancelFunc
+	startTime time.Time
+	width     int
+	height    int
 }
 
-// NewModel creates an initial TUI model.
-func NewModel(cfg stress.Config, pool *stress.InteractionPool, metrics *stress.Metrics, sampler *Sampler, startEmbedded bool) Model {
-	ctx, cancel := context.WithCancel(context.Background())
+// NewModel creates an initial read-only TUI monitor model.
+func NewModel(statusFile, targetURL string, sampler *Sampler) Model {
 	m := Model{
-		cfg:             cfg,
-		pool:            pool,
-		metrics:         metrics,
-		metricsSnap:     metrics.Snapshot(),
-		sampler:         sampler,
-		startTime:       time.Now(),
-		embeddedRunning: startEmbedded,
-		width:           100,
-		height:          35,
-		runCtx:          ctx,
-		runCancel:       cancel,
+		statusFile: statusFile,
+		targetURL:  targetURL,
+		sampler:    sampler,
+		startTime:  time.Now(),
+		width:      100,
+		height:     35,
 	}
 
-	// Check if an external runner is already active at startup
-	extStatus, err := stress.LoadRunnerStatus(stress.DefaultStatusFilePath)
-	if err == nil && extStatus.Active && time.Since(extStatus.UpdatedAt) < 4*time.Second {
-		m.externalActive = true
-		m.externalRunner = extStatus
-		m.metricsSnap = extStatus.Snapshot
-	} else if startEmbedded {
-		m.startWorkload()
+	// Try reading initial status if file exists
+	if status, err := stress.LoadRunnerStatus(statusFile); err == nil {
+		m.runnerStatus = status
+		m.metricsSnap = status.Snapshot
+		if status.Active && time.Since(status.UpdatedAt) < 4*time.Second {
+			m.runnerActive = true
+		}
 	}
 
 	return m
-}
-
-func (m *Model) startWorkload() {
-	controller := stress.NewPressureController(m.cfg, m.pool, m.metrics)
-	m.embeddedRunning = true
-	go func() {
-		_ = controller.Run(m.runCtx, io.Discard)
-	}()
 }
 
 // Init sets up the initial 1-second tick loop.
@@ -85,54 +63,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
-			if m.runCancel != nil {
-				m.runCancel()
-			}
 			if m.sampler != nil {
 				m.sampler.Close()
 			}
 			return m, tea.Quit
 
-		case " ":
-			// Toggle embedded load generation if no external runner is active
-			if !m.externalActive {
-				if m.embeddedRunning {
-					m.embeddedRunning = false
-					if m.runCancel != nil {
-						m.runCancel()
-					}
-				} else {
-					m.runCtx, m.runCancel = context.WithCancel(context.Background())
-					m.startWorkload()
-				}
-			}
-
-		case "+", "=":
-			m.cfg.RPS += 50
-			if m.embeddedRunning {
-				if m.runCancel != nil {
-					m.runCancel()
-				}
-				m.runCtx, m.runCancel = context.WithCancel(context.Background())
-				m.startWorkload()
-			}
-
-		case "-", "_":
-			if m.cfg.RPS > 50 {
-				m.cfg.RPS -= 50
-				if m.embeddedRunning {
-					if m.runCancel != nil {
-						m.runCancel()
-					}
-					m.runCtx, m.runCancel = context.WithCancel(context.Background())
-					m.startWorkload()
-				}
-			}
-
 		case "c":
-			// In-place reset preserves pointer so background workers continue updating
-			m.metrics.Reset()
-			m.metricsSnap = m.metrics.Snapshot()
+			// Clear local snapshot display
+			m.metricsSnap = stress.Snapshot{}
 		}
 
 	case tea.WindowSizeMsg:
@@ -140,25 +78,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		if m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration && m.embeddedRunning {
-			m.embeddedRunning = false
-			if m.runCancel != nil {
-				m.runCancel()
-			}
-		}
-
-		// Check for active external stress test runner
-		extStatus, err := stress.LoadRunnerStatus(stress.DefaultStatusFilePath)
-		if err == nil && extStatus.Active && time.Since(extStatus.UpdatedAt) < 4*time.Second {
-			m.externalActive = true
-			m.externalRunner = extStatus
-			m.metricsSnap = extStatus.Snapshot
-		} else {
-			m.externalActive = false
-			if m.embeddedRunning {
-				m.metricsSnap = m.metrics.Snapshot()
-			}
-		}
+		m.updateRunnerStatus()
 
 		// Sample system and database state
 		if m.sampler != nil {
@@ -171,6 +91,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateRunnerStatus() {
+	status, err := stress.LoadRunnerStatus(m.statusFile)
+	if err != nil {
+		m.runnerActive = false
+		return
+	}
+
+	m.runnerStatus = status
+	if status.Active && time.Since(status.UpdatedAt) < 4*time.Second {
+		m.runnerActive = true
+		m.metricsSnap = status.Snapshot
+		return
+	}
+
+	m.runnerActive = false
+	if status.Snapshot.TotalRequests > 0 && m.metricsSnap.TotalRequests == 0 {
+		m.metricsSnap = status.Snapshot
+	}
 }
 
 // View constructs the single-pane dashboard layout.

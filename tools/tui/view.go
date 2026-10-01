@@ -71,28 +71,25 @@ var (
 )
 
 func renderHeader(m Model) string {
-	title := styleTitle.Render("⚡ KOZLONY TUI LOAD & STACK MONITOR")
+	title := styleTitle.Render("⚡ KOZLONY TUI STACK & LOAD MONITOR")
 	clock := styleMuted.Render(time.Now().Format("15:04:05"))
 
 	var statusPill string
 	switch {
-	case m.externalActive:
-		statusPill = stylePillActive.Render(fmt.Sprintf("● RUNNER ACTIVE (PID %d)", m.externalRunner.PID))
-	case m.embeddedRunning:
-		statusPill = stylePillActive.Render("● EMBEDDED LOAD ACTIVE")
-	case m.cfg.Duration > 0 && time.Since(m.startTime) >= m.cfg.Duration:
-		statusPill = stylePillPaused.Render("✔ COMPLETED")
+	case m.runnerActive:
+		statusPill = stylePillActive.Render(fmt.Sprintf("● RUNNER ACTIVE (PID %d)", m.runnerStatus.PID))
+	case m.metricsSnap.TotalRequests > 0:
+		statusPill = stylePillPaused.Render("✔ RUNNER IDLE / COMPLETED")
 	default:
-		statusPill = stylePillPaused.Render("⏸ STANDBY (PRESS [SPACE] OR RUN STRESS)")
+		statusPill = stylePillPaused.Render("⏸ IDLE (WAITING FOR STRESS RUNNER)")
 	}
 
 	var info string
-	if m.externalActive {
-		info = fmt.Sprintf("target: %s | users: %d | rps: %.0f | pool: %d",
-			m.externalRunner.TargetURL, m.externalRunner.Users, m.externalRunner.TargetRPS, m.pool.Size())
+	if m.runnerActive {
+		info = fmt.Sprintf("target: %s | users: %d | rps_target: %.0f | pool: %d",
+			m.runnerStatus.TargetURL, m.runnerStatus.Users, m.runnerStatus.TargetRPS, m.runnerStatus.PoolSize)
 	} else {
-		info = fmt.Sprintf("target: %s | users: %d | rps: %.0f | pool: %d",
-			m.cfg.TargetURL, m.cfg.Users, m.cfg.RPS, m.pool.Size())
+		info = fmt.Sprintf("target: %s | status_file: %s", m.targetURL, m.statusFile)
 	}
 	infoStyled := styleMuted.Render(info)
 
@@ -103,19 +100,15 @@ func renderHeader(m Model) string {
 func renderWorkloadCard(m Model, cardWidth int) string {
 	snap := m.metricsSnap
 
-	cardTitleText := "WORKLOAD & THROUGHPUT"
-	if m.externalActive {
-		cardTitleText += " (EXTERNAL STRESS RUNNER)"
-	} else if m.embeddedRunning {
-		cardTitleText += " (EMBEDDED WORKLOAD GENERATOR)"
-	} else {
-		cardTitleText += " (STANDBY - PRESS [SPACE] TO START EMBEDDED LOAD)"
+	cardTitleText := "WORKLOAD & THROUGHPUT (MONITORING TOOLS/STRESS)"
+	if !m.runnerActive && m.metricsSnap.TotalRequests == 0 {
+		cardTitleText += " - WAITING FOR RUNNER"
 	}
 	cardTitle := styleCardTitle.Render(cardTitleText)
 
 	// Throughput & summary line
 	rpsColor := styleOK
-	if snap.IntervalRPS < m.cfg.RPS*0.8 && m.cfg.RPS > 0 {
+	if m.runnerActive && snap.IntervalRPS < m.runnerStatus.TargetRPS*0.8 && m.runnerStatus.TargetRPS > 0 {
 		rpsColor = styleWarn
 	}
 
@@ -275,9 +268,14 @@ func renderDatabaseCard(m Model, cardWidth int) string {
 		dbStatus = styleMuted.Render("STANDBY (Direct PG query inactive)")
 	}
 
-	line1 := fmt.Sprintf("  %-22s %s | %-16s %d items",
+	poolItems := "-"
+	if m.runnerActive || m.runnerStatus.PoolSize > 0 {
+		poolItems = fmt.Sprintf("%d items", m.runnerStatus.PoolSize)
+	}
+
+	line1 := fmt.Sprintf("  %-22s %s | %-16s %s",
 		styleMuted.Render("PostgreSQL State:"), dbStatus,
-		styleMuted.Render("In-Memory Pool:"), m.pool.Size(),
+		styleMuted.Render("Runner Pool:"), poolItems,
 	)
 
 	line2 := fmt.Sprintf("  %-22s %7d rows | %-16s %7d | %-16s %7d",
@@ -304,8 +302,8 @@ func renderDatabaseCard(m Model, cardWidth int) string {
 
 func renderFooter(m Model) string {
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
-	hints := "[q] Quit  [space] Pause/Resume  [+] RPS +50  [-] RPS -50  [c] Clear Metrics"
-	status := fmt.Sprintf("Elapsed: %v | %s", elapsed, hints)
+	hints := "[q] Quit  [c] Clear Snapshot"
+	status := fmt.Sprintf("Uptime: %v | %s", elapsed, hints)
 	return styleFooter.Width(m.width).Render(status)
 }
 

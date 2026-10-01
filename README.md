@@ -252,8 +252,8 @@ The blackbox suite verifies:
 7. Micro-batch drainer flush to PostgreSQL and thread hierarchy retrieval.
 8. Optimistic concurrency edit (`version`) and `409 Conflict` rejection on stale versions.
 
-### Stress Testing & Workload Pressure Controller
-A dedicated load-generation and pressure-controlling CLI app inspired by production workload runners is provided in `cmd/stresstest` and `internal/stress`.
+### Stress Testing & Workload Pressure Controller (`tools/stress`)
+A dedicated load-generation and pressure-controlling CLI app inspired by production workload runners is provided in `tools/stress`.
 
 #### Features:
 - **Hierarchical Conversation Growth**: Automatically generates root discussions and attaches multi-level nested replies (`depth >= 1`), building realistic conversation trees.
@@ -263,7 +263,7 @@ A dedicated load-generation and pressure-controlling CLI app inspired by product
   - Global requests-per-second rate limiter ceiling (`-rps`, default unconstrained `0`).
   - Per-user think-time pacing jitter (`-min-think` to `-max-think`, default `1s` to `3s`).
   - Action probability weights (`-weight-root`, `-weight-reply`, `-weight-edit`, `-weight-read`).
-- **Live Telemetry & Reporting**: Live runner console line displaying real-time interval RPS, OK/ERR counters, latency quantiles (P50, P90, P99, Max), and active interaction pool size, followed by a full summary breakdown upon completion.
+- **Telemetry Publishing**: Live runner console line and atomic 1-second status broadcast to `/tmp/kozlony-stress-status.json` for external observers.
 
 #### Running the Stress Test:
 ```bash
@@ -280,13 +280,15 @@ make stress ARGS="-users 50 -rps 200 -duration 10s"
 ---
 
 ### Interactive TUI Stack & Load Monitor (`tools/tui`)
-An interactive single-pane terminal dashboard built with **Bubble Tea** and **Lip Gloss**.
+An interactive, **pure read-only** single-pane terminal dashboard built with **Bubble Tea** and **Lip Gloss**:
+
+> *The TUI is strictly a monitor — it does not start runs, stop runs, or mutate the system. It discovers and renders active status from the workload runner, PostgreSQL, and Docker containers.*
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ ⚡ KOZLONY TUI LOAD & STACK MONITOR  16:50:12  ● ACTIVE  target: http://localhost:8080  │
+│ ⚡ KOZLONY TUI STACK & LOAD MONITOR  16:50:12  ● RUNNER ACTIVE (PID 2954575)            │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
-│ WORKLOAD & THROUGHPUT                                                                  │
+│ WORKLOAD & THROUGHPUT (MONITORING TOOLS/STRESS)                                        │
 │   Throughput:  1074.2 req/s (overall: 1060.1 req/s)   Requests: 21,500 (99.4% ok)      │
 │   Latencies (Window): P50: 700µs | P90: 2.2ms | P99: 9.0ms | Max: 53.4ms               │
 │                                                                                        │
@@ -303,29 +305,23 @@ An interactive single-pane terminal dashboard built with **Bubble Tea** and **Li
 │   NATS JetStream (File Engine)    CPU:  18.9% [■■■■░░░░░░░░░░░░░░░░]  RAM:    50.9 MB  │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
 │ DATABASE & HIERARCHICAL CONVERSATION STATE                                             │
-│   PostgreSQL State: ONLINE | In-Memory Pool: 10,000 items                              │
+│   PostgreSQL State: ONLINE | Runner Pool: 10,000 items                                 │
 │   Total Ingested:    16315 rows | Root Discussions:    4408 | Replies:       11907     │
 │   Max Tree Depth:       13 levels | Reply Counts Incremented:     7275 posts           │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Features & Hotkeys:
-- **Continuous Real-Time Workload Generation**: Runs indefinitely by default (`duration = 0`) until stopped.
-- **Dynamic Pacing Adjustment**: Press `[+]` or `[-]` to raise or lower the target RPS ceiling on the fly.
-- **Pause & Resume**: Press `[space]` to pause the simulated workload while keeping live stack monitoring active.
-- **Clear Metrics**: Press `[c]` to reset interval and cumulative counters without restarting the process.
-- **Clean Exit**: Press `[q]` or `Ctrl+C` to cleanly terminate workers and restore terminal alt-screen.
+#### Hotkeys:
+- `[q]` / `Ctrl+C`: Clean exit and restore terminal screen.
+- `[c]`: Reset local snapshot display.
 
-#### Running the TUI:
+#### Running the Workflow:
 ```bash
-# Launch with defaults (100 users, 1000 req/s ceiling, indefinite run)
+# Terminal 1: Start the read-only monitor
 make tui
 
-# Custom parameters:
-make tui ARGS="-users 50 -rps 500"
-
-# Direct binary execution:
-./bin/kozlony-tui -url http://localhost:8080 -users 150 -rps 1000 -min-think 10ms -max-think 60ms
+# Terminal 2: Run the workload generator
+make stress ARGS="-users 100 -rps 1000"
 ```
 
 ---
