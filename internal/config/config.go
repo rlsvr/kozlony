@@ -2,12 +2,42 @@
 package config
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/sethvargo/go-envconfig"
 )
+
+// loadDotEnv reads key-value pairs from .env if present and sets them in os.Environ if not already set.
+func loadDotEnv() {
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
+}
 
 // Config holds all application configuration values populated from environment variables.
 type Config struct {
@@ -42,6 +72,7 @@ type Config struct {
 
 // Load reads configuration from environment variables and returns a populated Config.
 func Load(ctx context.Context) (*Config, error) {
+	loadDotEnv()
 	var c Config
 	if err := envconfig.Process(ctx, &c); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)

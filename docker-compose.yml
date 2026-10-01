@@ -2,6 +2,18 @@ services:
   postgres:
     image: postgres:17-alpine
     container_name: kozlony-postgres
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "work_mem=64MB"
+      - "-c"
+      - "wal_buffers=32MB"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "max_connections=100"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -12,6 +24,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d messageboard"]
       interval: 5s
@@ -29,12 +46,46 @@ services:
       - "8223:8222"
     volumes:
       - natsdata:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 3s
+    networks:
+      - kozlony_net
+
+  kozlony:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kozlony-api
+    environment:
+      ADDR: ":8080"
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/messageboard?sslmode=disable"
+      NATS_URL: "nats://nats:4222"
+      NATS_CONCURRENT_SUBSCRIBERS: "8"
+      DRAIN_BATCH_SIZE: "2000"
+      DRAIN_FLUSH_INTERVAL: "100ms"
+      DATABASE_MAX_CONNS: "50"
+      LOG_LEVEL: "info"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
     networks:
       - kozlony_net
 

@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -89,5 +90,40 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.PrettyLogging {
 		t.Errorf("expected PrettyLogging false, got %v", cfg.PrettyLogging)
+	}
+}
+
+func TestConfigLoadDotEnv(t *testing.T) {
+	// Create a temporary directory with a .env file and switch to it
+	tmpDir := t.TempDir()
+	envPath := tmpDir + "/.env"
+	envContent := "# Comment\nDRAIN_BATCH_SIZE=1500\nDRAIN_FLUSH_INTERVAL=75ms\nAPP_NAME=\"custom-app\"\n"
+	if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
+		t.Fatalf("failed to write temp .env: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get wd: %v", err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tempDir: %v", err)
+	}
+
+	cfg, err := config.Load(context.Background())
+	if err != nil {
+		t.Fatalf("failed to load config with .env: %v", err)
+	}
+
+	if cfg.DrainBatchSize != 1500 {
+		t.Errorf("expected DRAIN_BATCH_SIZE 1500, got %d", cfg.DrainBatchSize)
+	}
+	if cfg.DrainFlushInterval != 75*time.Millisecond {
+		t.Errorf("expected DRAIN_FLUSH_INTERVAL 75ms, got %v", cfg.DrainFlushInterval)
+	}
+	if cfg.AppName != "custom-app" {
+		t.Errorf("expected AppName custom-app, got %s", cfg.AppName)
 	}
 }
