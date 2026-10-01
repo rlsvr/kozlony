@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/rlsvr/kozlony/tools/stress/runner"
 )
 
 func main() {
-	cfg, err := ParseFlags(os.Args[1:])
+	cfg, err := runner.ParseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
@@ -21,16 +23,11 @@ func main() {
 	fmt.Println("=== Kozlony Stress Test & Workload Generator ===")
 	fmt.Printf("Target URL:       %s\n", cfg.TargetURL)
 	fmt.Printf("Simulated Users:  %d distinct user accounts\n", cfg.Users)
-	fmt.Printf("Worker Pool:      %d concurrent workers (hirnok/pkg/worker)\n", cfg.Workers)
+	fmt.Printf("Worker Pool:      %d concurrent workers (continuous pressure)\n", cfg.Workers)
 	if cfg.RPS > 0 {
 		fmt.Printf("Target RPS:       %.1f req/s\n", cfg.RPS)
 	} else {
 		fmt.Printf("Target RPS:       unconstrained (maximum throughput)\n")
-	}
-	if cfg.MinThink > 0 || cfg.MaxThink > 0 {
-		fmt.Printf("Think Time:       %v - %v\n", cfg.MinThink, cfg.MaxThink)
-	} else {
-		fmt.Printf("Think Time:       0s (immediate execution)\n")
 	}
 	if cfg.Duration > 0 {
 		fmt.Printf("Duration:         %v\n", cfg.Duration)
@@ -41,18 +38,8 @@ func main() {
 	fmt.Printf("Group ID:         %s\n", cfg.GroupID)
 	fmt.Println("================================================")
 
-	avgThink := (cfg.MinThink + cfg.MaxThink) / 2
-	if avgThink > 0 && cfg.RPS > 0 {
-		maxAchievableRPS := float64(cfg.Workers) / avgThink.Seconds()
-		if cfg.RPS > maxAchievableRPS {
-			fmt.Printf("⚠️  NOTE: With %d workers and avg think time %v, throughput is physically capped at ~%.0f req/s.\n", cfg.Workers, avgThink, maxAchievableRPS)
-			fmt.Printf("   To achieve %.0f req/s, set -min-think 0ms -max-think 0ms (pacing is controlled by -rps).\n", cfg.RPS)
-			fmt.Println("================================================")
-		}
-	}
-
-	pool := NewInteractionPool(10000)
-	metrics := NewMetrics()
+	pool := runner.NewInteractionPool(10000)
+	metrics := runner.NewMetrics()
 
 	// Seed pool with existing interactions if available
 	fmt.Print("Seeding interaction pool from feed... ")
@@ -62,7 +49,7 @@ func main() {
 		fmt.Printf("done (%d items loaded)\n", pool.Size())
 	}
 
-	controller := NewPressureController(cfg, pool, metrics)
+	controller := runner.NewPressureController(cfg, pool, metrics)
 
 	fmt.Println("Starting workload generator...")
 	if err := controller.Run(ctx, os.Stdout); err != nil && ctx.Err() == nil {

@@ -1,4 +1,4 @@
-package main
+package runner
 
 import (
 	"errors"
@@ -16,8 +16,6 @@ type Config struct {
 	Users          int           // Population size of simulated users
 	Workers        int           // Execution worker pool concurrency
 	RPS            float64       // Target requests per second ceiling (0 for unconstrained)
-	MinThink       time.Duration // Minimum think time between actions
-	MaxThink       time.Duration // Maximum think time between actions
 	MinBody        int           // Minimum interaction body character length (default: 0)
 	MaxBody        int           // Maximum interaction body character length (default: 1000)
 	Duration       time.Duration // Total test duration (0 for indefinite)
@@ -36,8 +34,6 @@ func DefaultConfig() Config {
 		Users:          1000,
 		Workers:        200,
 		RPS:            0,
-		MinThink:       0,
-		MaxThink:       0,
 		MinBody:        0,
 		MaxBody:        1000,
 		Duration:       0,
@@ -55,12 +51,14 @@ func ParseFlags(args []string) (Config, error) {
 	cfg := DefaultConfig()
 	fs := flag.NewFlagSet("stresstest", flag.ContinueOnError)
 
+	var deprecatedMinThink, deprecatedMaxThink time.Duration
+
 	fs.StringVar(&cfg.TargetURL, "url", cfg.TargetURL, "Base URL of the Kozlony API")
 	fs.IntVar(&cfg.Users, "users", cfg.Users, "Simulated user identity population size (e.g. 1000000)")
 	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "Execution worker pool concurrency (default: 200, max: 2000)")
 	fs.Float64Var(&cfg.RPS, "rps", cfg.RPS, "Global max requests per second ceiling (0 for unconstrained)")
-	fs.DurationVar(&cfg.MinThink, "min-think", cfg.MinThink, "Minimum think time between actions")
-	fs.DurationVar(&cfg.MaxThink, "max-think", cfg.MaxThink, "Maximum think time between actions")
+	fs.DurationVar(&deprecatedMinThink, "min-think", 0, "Deprecated: no-op (workers maintain continuous pressure without sleeping)")
+	fs.DurationVar(&deprecatedMaxThink, "max-think", 0, "Deprecated: no-op (workers maintain continuous pressure without sleeping)")
 	fs.IntVar(&cfg.MinBody, "min-body", cfg.MinBody, "Minimum interaction body character length (default: 0)")
 	fs.IntVar(&cfg.MaxBody, "max-body", cfg.MaxBody, "Maximum interaction body character length (default: 1000)")
 	fs.DurationVar(&cfg.Duration, "duration", cfg.Duration, "Total test duration (0 for indefinite until SIGINT)")
@@ -95,12 +93,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers > MaxAllowedWorkers {
 		return fmt.Errorf("workers (%d) exceeds safe execution pool limit of %d to protect OS resources", c.Workers, MaxAllowedWorkers)
-	}
-	if c.MinThink < 0 || c.MaxThink < 0 {
-		return errors.New("think times must be non-negative")
-	}
-	if c.MinThink > c.MaxThink {
-		return fmt.Errorf("min-think (%v) cannot exceed max-think (%v)", c.MinThink, c.MaxThink)
 	}
 	if c.MinBody < 0 || c.MaxBody < 0 {
 		return errors.New("body lengths must be non-negative")

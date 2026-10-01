@@ -1,4 +1,4 @@
-package main
+package runner
 
 import (
 	"bytes"
@@ -138,19 +138,6 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 		author := fmt.Sprintf("user-%05d", rng.Intn(c.cfg.Users)+1)
 		action := c.selectAction(rng)
 		c.executeAction(workerCtx, rng, author, action)
-
-		if c.cfg.MaxThink > 0 {
-			var think time.Duration
-			if c.cfg.MaxThink > c.cfg.MinThink {
-				think = c.cfg.MinThink + time.Duration(rng.Int63n(int64(c.cfg.MaxThink-c.cfg.MinThink)))
-			} else {
-				think = c.cfg.MinThink
-			}
-			select {
-			case <-workerCtx.Done():
-			case <-time.After(think):
-			}
-		}
 	})
 
 	// Dispatcher goroutine: feeds the bounded queue according to RPS or unconstrained
@@ -315,7 +302,7 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 	data, _ := json.Marshal(payload)
 	reqURL := fmt.Sprintf("%s/v1/interactions", c.cfg.TargetURL)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(data)) //nolint:gosec // Load generator target URL
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(data))
 	if err != nil {
 		c.metrics.Record(action, 0, 0, err)
 		return
@@ -324,7 +311,7 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 	req.Header.Set("Idempotency-Key", uuid.New().String())
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
+	resp, err := c.httpClient.Do(req)
 	lat := time.Since(start)
 
 	if err != nil {
@@ -376,7 +363,7 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	data, _ := json.Marshal(payload)
 	reqURL := fmt.Sprintf("%s/v1/interactions/%s", c.cfg.TargetURL, item.ID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data)) //nolint:gosec // Load generator target URL
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, bytes.NewReader(data))
 	if err != nil {
 		c.metrics.Record("edit", 0, 0, err)
 		return
@@ -384,7 +371,7 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	req.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
+	resp, err := c.httpClient.Do(req)
 	lat := time.Since(start)
 
 	if err != nil {
@@ -415,14 +402,14 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 		reqURL = fmt.Sprintf("%s/v1/interactions?group_id=%s&limit=25", c.cfg.TargetURL, c.cfg.GroupID)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil) //nolint:gosec // Load generator target URL
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		c.metrics.Record(action, 0, 0, err)
 		return
 	}
 
 	start := time.Now()
-	resp, err := c.httpClient.Do(req) //nolint:gosec // Load generator target URL
+	resp, err := c.httpClient.Do(req)
 	lat := time.Since(start)
 
 	if err != nil {

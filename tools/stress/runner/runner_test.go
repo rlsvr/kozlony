@@ -1,4 +1,4 @@
-package main
+package runner_test
 
 import (
 	"bytes"
@@ -14,12 +14,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/rlsvr/kozlony/tools/stress/runner"
 )
 
 const fieldInteractions = "interactions"
 
 func TestConfigValidation(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := runner.DefaultConfig()
 	require.NoError(t, cfg.Validate())
 
 	invalidURL := cfg
@@ -35,13 +37,8 @@ func TestConfigValidation(t *testing.T) {
 	require.Error(t, invalidWorkers.Validate())
 
 	tooManyWorkers := cfg
-	tooManyWorkers.Workers = MaxAllowedWorkers + 1
+	tooManyWorkers.Workers = runner.MaxAllowedWorkers + 1
 	require.Error(t, tooManyWorkers.Validate())
-
-	invalidThink := cfg
-	invalidThink.MinThink = 5 * time.Second
-	invalidThink.MaxThink = 1 * time.Second
-	require.Error(t, invalidThink.Validate())
 
 	invalidBodyNeg := cfg
 	invalidBodyNeg.MinBody = -1
@@ -74,7 +71,7 @@ func TestParseFlags(t *testing.T) {
 		"-users", "1000000",
 		"-workers", "150",
 		"-rps", "45.5",
-		"-min-think", "500ms",
+		"-min-think", "500ms", // Deprecated flag handled gracefully
 		"-max-think", "1500ms",
 		"-min-body", "50",
 		"-max-body", "500",
@@ -82,14 +79,12 @@ func TestParseFlags(t *testing.T) {
 		"-group", "custom-group",
 	}
 
-	cfg, err := ParseFlags(args)
+	cfg, err := runner.ParseFlags(args)
 	require.NoError(t, err)
 	assert.Equal(t, "http://test-server:9090", cfg.TargetURL)
 	assert.Equal(t, 1000000, cfg.Users)
 	assert.Equal(t, 150, cfg.Workers)
 	assert.InDelta(t, 45.5, cfg.RPS, 0.001)
-	assert.Equal(t, 500*time.Millisecond, cfg.MinThink)
-	assert.Equal(t, 1500*time.Millisecond, cfg.MaxThink)
 	assert.Equal(t, 50, cfg.MinBody)
 	assert.Equal(t, 500, cfg.MaxBody)
 	assert.Equal(t, 10*time.Second, cfg.Duration)
@@ -97,7 +92,7 @@ func TestParseFlags(t *testing.T) {
 }
 
 func TestInteractionPool(t *testing.T) {
-	pool := NewInteractionPool(3)
+	pool := runner.NewInteractionPool(3)
 	assert.Equal(t, 0, pool.Size())
 
 	_, ok := pool.GetRandomParent()
@@ -108,17 +103,17 @@ func TestInteractionPool(t *testing.T) {
 	id3 := uuid.New()
 	id4 := uuid.New()
 
-	pool.Add(InteractionRef{ID: id1, Version: 1})
-	pool.Add(InteractionRef{ID: id2, Version: 1})
-	pool.Add(InteractionRef{ID: id3, Version: 1})
+	pool.Add(runner.InteractionRef{ID: id1, Version: 1})
+	pool.Add(runner.InteractionRef{ID: id2, Version: 1})
+	pool.Add(runner.InteractionRef{ID: id3, Version: 1})
 	assert.Equal(t, 3, pool.Size())
 
 	// Re-adding existing ID updates without expanding
-	pool.Add(InteractionRef{ID: id2, Version: 2})
+	pool.Add(runner.InteractionRef{ID: id2, Version: 2})
 	assert.Equal(t, 3, pool.Size())
 
 	// Eviction of oldest (id1)
-	pool.Add(InteractionRef{ID: id4, Version: 1})
+	pool.Add(runner.InteractionRef{ID: id4, Version: 1})
 	assert.Equal(t, 3, pool.Size())
 
 	// Test UpdateVersion
@@ -154,7 +149,7 @@ func TestInteractionPoolSeed(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	pool := NewInteractionPool(10)
+	pool := runner.NewInteractionPool(10)
 	err := pool.SeedFromFeed(context.Background(), ts.URL, "test-group")
 	require.NoError(t, err)
 	assert.Equal(t, 1, pool.Size())
@@ -165,7 +160,7 @@ func TestInteractionPoolSeed(t *testing.T) {
 }
 
 func TestMetricsPercentiles(t *testing.T) {
-	p50, p90, p99, maxLat := LatencyPercentiles(nil)
+	p50, p90, p99, maxLat := runner.LatencyPercentiles(nil)
 	assert.Equal(t, time.Duration(0), p50)
 	assert.Equal(t, time.Duration(0), p90)
 	assert.Equal(t, time.Duration(0), p99)
@@ -178,7 +173,7 @@ func TestMetricsPercentiles(t *testing.T) {
 		40 * time.Millisecond,
 		50 * time.Millisecond,
 	}
-	p50, p90, p99, maxLat = LatencyPercentiles(lats)
+	p50, p90, p99, maxLat = runner.LatencyPercentiles(lats)
 	assert.Equal(t, 30*time.Millisecond, p50)
 	assert.Equal(t, 50*time.Millisecond, p90)
 	assert.Equal(t, 50*time.Millisecond, p99)
@@ -186,7 +181,7 @@ func TestMetricsPercentiles(t *testing.T) {
 }
 
 func TestMetricsRecordingAndReporting(t *testing.T) {
-	m := NewMetrics()
+	m := runner.NewMetrics()
 	m.Record("create_root", http.StatusCreated, 15*time.Millisecond, nil)
 	m.Record("create_reply", http.StatusCreated, 10*time.Millisecond, nil)
 	m.Record("edit", http.StatusOK, 5*time.Millisecond, nil)
@@ -235,12 +230,10 @@ func TestPressureController(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{
+	cfg := runner.Config{
 		TargetURL:      server.URL,
 		Users:          3,
 		RPS:            50,
-		MinThink:       5 * time.Millisecond,
-		MaxThink:       10 * time.Millisecond,
 		Duration:       100 * time.Millisecond,
 		GroupID:        "root",
 		ReportInterval: 50 * time.Millisecond,
@@ -250,9 +243,9 @@ func TestPressureController(t *testing.T) {
 		ReadWeight:     25,
 	}
 
-	pool := NewInteractionPool(100)
-	metrics := NewMetrics()
-	controller := NewPressureController(cfg, pool, metrics)
+	pool := runner.NewInteractionPool(100)
+	metrics := runner.NewMetrics()
+	controller := runner.NewPressureController(cfg, pool, metrics)
 
 	var buf bytes.Buffer
 	err := controller.Run(context.Background(), &buf)
