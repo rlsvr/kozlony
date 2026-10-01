@@ -27,7 +27,9 @@ type Config struct {
 	NATSStreamRetention       time.Duration `env:"NATS_STREAM_RETENTION,default=336h"`
 
 	// PostgreSQL persistence configuration
-	DatabaseURL string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"`
+	DatabaseURL      string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"`
+	DatabaseMaxConns int    `env:"DATABASE_MAX_CONNS,default=50"`
+	DatabaseMinConns int    `env:"DATABASE_MIN_CONNS,default=10"`
 
 	// In-memory hot cache configuration
 	MaxCachedInteractions int           `env:"MAX_CACHED_INTERACTIONS,default=500000"`

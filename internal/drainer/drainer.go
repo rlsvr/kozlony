@@ -35,18 +35,23 @@ type Drainer struct {
 	dlq           DLQPublisher
 	batchSize     int
 	flushInterval time.Duration
+	workers       int
 }
 
 // New creates a new Drainer instance.
 func New(fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
+	workers := 1
 	if cfg != nil {
 		if cfg.DrainBatchSize > 0 {
 			batchSize = cfg.DrainBatchSize
 		}
 		if cfg.DrainFlushInterval > 0 {
 			flushInterval = cfg.DrainFlushInterval
+		}
+		if cfg.NATSConcurrentSubscribers > 0 {
+			workers = cfg.NATSConcurrentSubscribers
 		}
 	}
 
@@ -56,6 +61,7 @@ func New(fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *
 		dlq:           dlq,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
+		workers:       workers,
 	}
 }
 
@@ -129,9 +135,15 @@ func (d *Drainer) routeToDLQ(ctx context.Context, msg jetstream.Msg, reason stri
 	_ = msg.Ack()
 }
 
-// Run continuously processes micro-batches until ctx is canceled.
-func (d *Drainer) Run(ctx context.Context) error {
+// Workers returns the configured number of concurrent drainer workers.
+func (d *Drainer) Workers() int {
+	return d.workers
+}
+
+// RunWorker continuously processes micro-batches for a specific worker until ctx is canceled.
+func (d *Drainer) RunWorker(ctx context.Context, workerID int) error {
 	log.Info().
+		Int("worker_id", workerID).
 		Int("batch_size", d.batchSize).
 		Dur("flush_interval", d.flushInterval).
 		Msg("starting JetStream micro-batch drainer worker")
@@ -139,11 +151,11 @@ func (d *Drainer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info().Msg("stopping micro-batch drainer worker")
+			log.Info().Int("worker_id", workerID).Msg("stopping micro-batch drainer worker")
 			return nil
 		default:
 			if _, err := d.ProcessBatch(ctx); err != nil {
-				log.Error().Err(err).Msg("error processing micro-batch")
+				log.Error().Err(err).Int("worker_id", workerID).Msg("error processing micro-batch")
 				select {
 				case <-ctx.Done():
 					return nil
@@ -154,13 +166,21 @@ func (d *Drainer) Run(ctx context.Context) error {
 	}
 }
 
-// Start runs the drainer worker in a background goroutine until ctx is canceled.
+// Run continuously processes micro-batches until ctx is canceled (worker 1).
+func (d *Drainer) Run(ctx context.Context) error {
+	return d.RunWorker(ctx, 1)
+}
+
+// Start runs the drainer workers in background goroutines until ctx is canceled.
 func (d *Drainer) Start(ctx context.Context) {
-	go func() {
-		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error().Err(err).Msg("micro-batch drainer worker exited with error")
-		}
-	}()
+	for i := 0; i < d.workers; i++ {
+		workerID := i + 1
+		go func(id int) {
+			if err := d.RunWorker(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Int("worker_id", id).Msg("micro-batch drainer worker exited with error")
+			}
+		}(workerID)
+	}
 }
 
 // Start creates a new Drainer and starts its background processing loop.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/rlsvr/kozlony/internal/stress"
 )
@@ -35,6 +36,23 @@ func main() {
 		fmt.Printf("Duration:         indefinite (press Ctrl+C to stop)\n")
 	}
 	fmt.Printf("Group ID:         %s\n", cfg.GroupID)
+
+	avgThink := (cfg.MinThink + cfg.MaxThink) / 2
+	if cfg.RPS > 0 && avgThink > 0 {
+		cycleTime := avgThink + time.Millisecond
+		maxPossibleRPS := float64(cfg.Users) / cycleTime.Seconds()
+		if maxPossibleRPS < cfg.RPS*0.85 {
+			fmt.Println("------------------------------------------------")
+			fmt.Printf("⚠️  NOTE: With %d users and %v avg think time, client max theoretical throughput is ~%.0f req/s.\n",
+				cfg.Users, avgThink, maxPossibleRPS)
+			suggestedUsers := int(cfg.RPS/500) + 50
+			if suggestedUsers < 100 {
+				suggestedUsers = 100
+			}
+			fmt.Printf("   To achieve requested %.0f req/s, pass: -min-think 0s -max-think 0s -users %d\n",
+				cfg.RPS, suggestedUsers)
+		}
+	}
 	fmt.Println("================================================")
 
 	pool := stress.NewInteractionPool(10000)

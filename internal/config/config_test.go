@@ -33,6 +33,12 @@ func TestConfigLoadDefaults(t *testing.T) {
 	if cfg.NATSStreamRetention != 336*time.Hour {
 		t.Errorf("expected NATSStreamRetention 336h, got %v", cfg.NATSStreamRetention)
 	}
+	if cfg.DatabaseMaxConns != 50 {
+		t.Errorf("expected DatabaseMaxConns 50, got %d", cfg.DatabaseMaxConns)
+	}
+	if cfg.DatabaseMinConns != 10 {
+		t.Errorf("expected DatabaseMinConns 10, got %d", cfg.DatabaseMinConns)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected LogLevel info, got %s", cfg.LogLevel)
 	}
@@ -47,6 +53,8 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	t.Setenv("DRAIN_FLUSH_INTERVAL", "100ms")
 	t.Setenv("NATS_CONCURRENT_SUBSCRIBERS", "64")
 	t.Setenv("NATS_STREAM_RETENTION", "720h")
+	t.Setenv("DATABASE_MAX_CONNS", "100")
+	t.Setenv("DATABASE_MIN_CONNS", "20")
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("PRETTY_LOGGING", "false")
 
@@ -69,6 +77,12 @@ func TestConfigLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.NATSStreamRetention != 720*time.Hour {
 		t.Errorf("expected 720h, got %v", cfg.NATSStreamRetention)
+	}
+	if cfg.DatabaseMaxConns != 100 {
+		t.Errorf("expected DatabaseMaxConns 100, got %d", cfg.DatabaseMaxConns)
+	}
+	if cfg.DatabaseMinConns != 20 {
+		t.Errorf("expected DatabaseMinConns 20, got %d", cfg.DatabaseMinConns)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("expected LogLevel debug, got %s", cfg.LogLevel)

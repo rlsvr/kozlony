@@ -50,12 +50,15 @@ func main() {
 		Str("log_level", level.String()).
 		Msg("initializing services")
 
-	dbPool, err := database.Connect(ctx, cfg.DatabaseURL)
+	dbPool, err := database.ConnectWithLimits(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to connect to PostgreSQL database (continuing without DB)")
 	} else {
 		defer dbPool.Close()
-		log.Info().Msg("connected to PostgreSQL database pool")
+		log.Info().
+			Int("max_conns", cfg.DatabaseMaxConns).
+			Int("min_conns", cfg.DatabaseMinConns).
+			Msg("connected to PostgreSQL database pool")
 	}
 
 	var repo database.Repository

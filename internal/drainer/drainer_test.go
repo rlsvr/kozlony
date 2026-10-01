@@ -281,3 +281,27 @@ func TestDrainer_StartHelper(t *testing.T) {
 		t.Fatal("expected non-nil drainer from Start helper")
 	}
 }
+
+func TestDrainer_ConcurrentWorkers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	cfg := &config.Config{
+		DrainBatchSize:            200,
+		DrainFlushInterval:        20 * time.Millisecond,
+		NATSConcurrentSubscribers: 16,
+	}
+
+	d := drainer.New(mockConsumer, mockRepo, nil, cfg)
+	if d.Workers() != 16 {
+		t.Fatalf("expected 16 workers, got %d", d.Workers())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	d.Start(ctx)
+}

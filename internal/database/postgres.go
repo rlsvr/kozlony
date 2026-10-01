@@ -3,9 +3,11 @@ package database
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -source=postgres.go -destination=mocks/mock_postgres.go -package=mocks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,15 +50,33 @@ type Interaction struct {
 	Version    int        `json:"version"`
 }
 
-// Connect parses the database URL, configures connection pool parameters, and validates connectivity.
+// Connect parses the database URL, configures connection pool parameters with defaults, and validates connectivity.
 func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	return ConnectWithLimits(ctx, databaseURL, 50, 10)
+}
+
+// ConnectWithLimits parses the database URL, configures custom connection pool limits, and validates connectivity.
+func ConnectWithLimits(ctx context.Context, databaseURL string, maxConns, minConns int) (*pgxpool.Pool, error) {
 	poolCfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
 
-	poolCfg.MaxConns = 50
-	poolCfg.MinConns = 5
+	if maxConns > 0 && maxConns <= 10000 {
+		poolCfg.MaxConns = int32(maxConns)
+	} else if maxConns > 10000 {
+		poolCfg.MaxConns = 10000
+	} else {
+		poolCfg.MaxConns = 50
+	}
+
+	if minConns > 0 && minConns <= 10000 {
+		poolCfg.MinConns = int32(minConns)
+	} else if minConns > 10000 {
+		poolCfg.MinConns = 10000
+	} else {
+		poolCfg.MinConns = 10
+	}
 	poolCfg.MaxConnLifetime = 1 * time.Hour
 	poolCfg.MaxConnIdleTime = 30 * time.Minute
 
@@ -203,7 +223,17 @@ func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Intera
 		return fmt.Errorf("close batch results: %w", err)
 	}
 
-	for id, count := range replyIncrements {
+	// Sort IDs to guarantee deterministic row lock acquisition and prevent deadlocks across concurrent workers
+	sortedIDs := make([]uuid.UUID, 0, len(replyIncrements))
+	for id := range replyIncrements {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Slice(sortedIDs, func(i, j int) bool {
+		return bytes.Compare(sortedIDs[i][:], sortedIDs[j][:]) < 0
+	})
+
+	for _, id := range sortedIDs {
+		count := replyIncrements[id]
 		_, err := tx.Exec(ctx, `UPDATE interactions SET reply_count = reply_count + $1 WHERE id = $2`, count, id)
 		if err != nil {
 			return fmt.Errorf("update reply_count for %s: %w", id, err)

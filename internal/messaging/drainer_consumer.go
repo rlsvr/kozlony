@@ -25,12 +25,18 @@ func NewDrainerConsumer(ctx context.Context, client *Client) (*DrainerConsumer, 
 		return nil, fmt.Errorf("get stream: %w", err)
 	}
 
+	maxAckPending := client.cfg.NATSConcurrentSubscribers * client.cfg.DrainBatchSize * 2
+	if maxAckPending < 20000 {
+		maxAckPending = 20000
+	}
+
 	consumerCfg := jetstream.ConsumerConfig{
 		Durable:       client.cfg.NATSConsumerName,
 		FilterSubject: SubjectAllEvents(client.cfg.NATSStreamName),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckWait:       client.cfg.NATSAckWait,
+		MaxAckPending: maxAckPending,
 	}
 
 	cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
