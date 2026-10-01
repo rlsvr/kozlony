@@ -1,6 +1,8 @@
 MODULE  := github.com/rlsvr/kozlony
 BINARY  := bin/kozlony
 CMD     := ./cmd/kozlony
+STRESS_BINARY := bin/stresstest
+STRESS_CMD    := ./cmd/stresstest
 
 OAPI_CODEGEN  := oapi-codegen
 GOLANGCI_LINT := golangci-lint
@@ -14,7 +16,7 @@ ASYNCAPI_CODEGEN_FLAGS := --only-models --struct-name-from-title --resolve-exten
 export
 
 .PHONY: all build run test test-verbose fmt lint lint-fix check clean \
-	openapi-gen asyncapi-gen gen mocks
+	openapi-gen asyncapi-gen gen mocks build-stress stress
 
 ## all: generate + build + test
 all: gen mocks build test
@@ -51,6 +53,15 @@ asyncapi-gen:
 build:
 	@mkdir -p bin
 	go build -o $(BINARY) $(CMD)
+
+## build-stress: compile the stress testing CLI binary
+build-stress:
+	@mkdir -p bin
+	go build -o $(STRESS_BINARY) $(STRESS_CMD)
+
+## stress: run the stress test tool (pass ARGS="-users 50 -rps 100")
+stress: build-stress
+	./$(STRESS_BINARY) $(ARGS)
 
 ## run: compile and execute the application
 run: build

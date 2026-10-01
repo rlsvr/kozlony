@@ -120,6 +120,8 @@ Ensure the following tools are installed:
 | `make asyncapi-gen` | Generates Go structs from AsyncAPI schemas in `schemas/`. |
 | `make mocks` | Generates Uber gomock mocks for package interfaces across `internal/`. |
 | `make build` | Compiles the binary into `bin/kozlony`. |
+| `make build-stress` | Compiles the stress testing CLI binary into `bin/stresstest`. |
+| `make stress` | Runs the stress testing tool (pass `ARGS="..."` to customize). |
 | `make run` | Builds and executes the server. |
 | `make test` | Runs unit and integration tests with the Go race detector (`-race`). |
 | `make test-verbose` | Runs tests in verbose mode (`-v`). |
@@ -247,6 +249,31 @@ The blackbox suite verifies:
 6. Multi-level nested replies (`depth >= 2`) with recursive parent lookup.
 7. Micro-batch drainer flush to PostgreSQL and thread hierarchy retrieval.
 8. Optimistic concurrency edit (`version`) and `409 Conflict` rejection on stale versions.
+
+### Stress Testing & Workload Pressure Controller
+A dedicated load-generation and pressure-controlling CLI app inspired by production workload runners is provided in `cmd/stresstest` and `internal/stress`.
+
+#### Features:
+- **Hierarchical Conversation Growth**: Automatically generates root discussions and attaches multi-level nested replies (`depth >= 1`), building realistic conversation trees.
+- **Optimistic Concurrency Stress**: Continuously issues concurrent edits (`PUT /v1/interactions/:id`), asserting version updates and conflict (`409`) absorption.
+- **Configurable Pressure Control**:
+  - Simulated active concurrent users (`-users`, default `20`).
+  - Global requests-per-second rate limiter ceiling (`-rps`, default unconstrained `0`).
+  - Per-user think-time pacing jitter (`-min-think` to `-max-think`, default `1s` to `3s`).
+  - Action probability weights (`-weight-root`, `-weight-reply`, `-weight-edit`, `-weight-read`).
+- **Live Telemetry & Reporting**: Live runner console line displaying real-time interval RPS, OK/ERR counters, latency quantiles (P50, P90, P99, Max), and active interaction pool size, followed by a full summary breakdown upon completion.
+
+#### Running the Stress Test:
+```bash
+# Compile and run with defaults (20 users, 1..3s think time, 30s duration)
+make stress
+
+# Custom run: 50 concurrent users, rate-limited at 200 req/s, 10s test duration
+make stress ARGS="-users 50 -rps 200 -duration 10s"
+
+# Directly via binary
+./bin/stresstest -url http://localhost:8080 -users 100 -rps 500 -min-think 200ms -max-think 800ms
+```
 
 ---
 
