@@ -25,6 +25,7 @@ type Config struct {
 	ReplyWeight    int
 	EditWeight     int
 	ReadWeight     int
+	WithClients    int // Number of concurrent real-time SSE stream subscriber clients (default: 0)
 }
 
 // DefaultConfig returns reasonable default settings for a stress test session.
@@ -43,6 +44,7 @@ func DefaultConfig() Config {
 		ReplyWeight:    55,
 		EditWeight:     15,
 		ReadWeight:     10,
+		WithClients:    0,
 	}
 }
 
@@ -68,6 +70,7 @@ func ParseFlags(args []string) (Config, error) {
 	fs.IntVar(&cfg.ReplyWeight, "weight-reply", cfg.ReplyWeight, "Probability weight for replying to existing interactions")
 	fs.IntVar(&cfg.EditWeight, "weight-edit", cfg.EditWeight, "Probability weight for editing existing interactions")
 	fs.IntVar(&cfg.ReadWeight, "weight-read", cfg.ReadWeight, "Probability weight for reading feeds and threads")
+	fs.IntVar(&cfg.WithClients, "with-clients", cfg.WithClients, "Number of concurrent live SSE stream subscriber clients (default: 0)")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -93,6 +96,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Workers > MaxAllowedWorkers {
 		return fmt.Errorf("workers (%d) exceeds safe execution pool limit of %d to protect OS resources", c.Workers, MaxAllowedWorkers)
+	}
+	if c.WithClients < 0 {
+		return errors.New("with-clients must be non-negative")
+	}
+	if c.WithClients > 10000 {
+		return errors.New("with-clients exceeds maximum safe client limit of 10000")
 	}
 	if c.MinBody < 0 || c.MaxBody < 0 {
 		return errors.New("body lengths must be non-negative")

@@ -28,6 +28,9 @@ type Snapshot struct {
 	AllMax          time.Duration    `json:"all_max"`
 	ActionCounts    map[string]int64 `json:"action_counts"`
 	StatusCodes     map[int]int64    `json:"status_codes"`
+	SSEClients      int64            `json:"sse_clients,omitempty"`
+	SSEEvents       int64            `json:"sse_events,omitempty"`
+	SSEEventRate    float64          `json:"sse_event_rate,omitempty"`
 }
 
 // RunnerStatus represents the overall live state of an external stress test runner.

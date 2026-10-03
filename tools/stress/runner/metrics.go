@@ -35,6 +35,28 @@ type Metrics struct {
 	intervalSuccess int64
 	intervalError   int64
 	intervalLats    []time.Duration
+
+	// SSE streaming counters
+	activeSSEClients  atomic.Int64
+	totalSSEEvents    atomic.Int64
+	sseErrors         atomic.Int64
+	intervalSSEEvents atomic.Int64
+}
+
+// SetSSEClients configures the active SSE client count for telemetry.
+func (m *Metrics) SetSSEClients(n int) {
+	m.activeSSEClients.Store(int64(n))
+}
+
+// RecordSSEEvent records a single received live SSE event.
+func (m *Metrics) RecordSSEEvent() {
+	m.totalSSEEvents.Add(1)
+	m.intervalSSEEvents.Add(1)
+}
+
+// RecordSSEError records an SSE connection or read failure.
+func (m *Metrics) RecordSSEError() {
+	m.sseErrors.Add(1)
 }
 
 // NewMetrics initializes a new telemetry collector.
@@ -116,16 +138,32 @@ func (m *Metrics) PrintLive(w io.Writer, poolSize int) status.Snapshot {
 	mins := int(snap.Elapsed.Minutes())
 	secs := int(snap.Elapsed.Seconds()) % 60
 
-	_, _ = fmt.Fprintf(w, "[%02d:%02d] rps=%6.1f | ok=%-7d err=%-5d | p50=%-7s p90=%-7s p99=%-7s max=%-7s | pool=%-5d\n",
-		mins, secs,
-		snap.IntervalRPS,
-		snap.SuccessRequests, snap.ErrorRequests,
-		snap.IntervalP50.Truncate(100*time.Microsecond),
-		snap.IntervalP90.Truncate(100*time.Microsecond),
-		snap.IntervalP99.Truncate(100*time.Microsecond),
-		snap.IntervalMax.Truncate(100*time.Microsecond),
-		poolSize,
-	)
+	sseClients := m.activeSSEClients.Load()
+	if sseClients > 0 {
+		_, _ = fmt.Fprintf(w, "[%02d:%02d] rps=%6.1f | ok=%-7d err=%-5d | p50=%-7s p90=%-7s p99=%-7s max=%-7s | pool=%-5d | sse=%d (%6.1f ev/s)\n",
+			mins, secs,
+			snap.IntervalRPS,
+			snap.SuccessRequests, snap.ErrorRequests,
+			snap.IntervalP50.Truncate(100*time.Microsecond),
+			snap.IntervalP90.Truncate(100*time.Microsecond),
+			snap.IntervalP99.Truncate(100*time.Microsecond),
+			snap.IntervalMax.Truncate(100*time.Microsecond),
+			poolSize,
+			sseClients,
+			snap.SSEEventRate,
+		)
+	} else {
+		_, _ = fmt.Fprintf(w, "[%02d:%02d] rps=%6.1f | ok=%-7d err=%-5d | p50=%-7s p90=%-7s p99=%-7s max=%-7s | pool=%-5d\n",
+			mins, secs,
+			snap.IntervalRPS,
+			snap.SuccessRequests, snap.ErrorRequests,
+			snap.IntervalP50.Truncate(100*time.Microsecond),
+			snap.IntervalP90.Truncate(100*time.Microsecond),
+			snap.IntervalP99.Truncate(100*time.Microsecond),
+			snap.IntervalMax.Truncate(100*time.Microsecond),
+			poolSize,
+		)
+	}
 	return snap
 }
 
@@ -188,6 +226,19 @@ func (m *Metrics) PrintSummary(w io.Writer, poolSize int) {
 			_, _ = fmt.Fprintf(w, "  [%d] %s\n", count, errStr)
 		}
 	}
+
+	if m.activeSSEClients.Load() > 0 || m.totalSSEEvents.Load() > 0 {
+		totalSSE := m.totalSSEEvents.Load()
+		var sseRate float64
+		if totalDuration.Seconds() > 0 {
+			sseRate = float64(totalSSE) / totalDuration.Seconds()
+		}
+		_, _ = fmt.Fprintln(w, "\n--- Real-Time SSE Clients ---")
+		_, _ = fmt.Fprintf(w, "  Active Clients:    %d\n", m.activeSSEClients.Load())
+		_, _ = fmt.Fprintf(w, "  Events Received:   %d\n", totalSSE)
+		_, _ = fmt.Fprintf(w, "  Event Rate:        %.2f events/s\n", sseRate)
+		_, _ = fmt.Fprintf(w, "  Connection Errors: %d\n", m.sseErrors.Load())
+	}
 	_, _ = fmt.Fprintln(w, "=============================================================")
 }
 
@@ -232,6 +283,9 @@ func (m *Metrics) Snapshot() status.Snapshot {
 		codes[k] = v
 	}
 
+	sseEv := m.intervalSSEEvents.Swap(0)
+	sseRate := float64(sseEv) / intervalDuration
+
 	m.lastReportTime = now
 	m.intervalTotal = 0
 	m.intervalSuccess = 0
@@ -256,6 +310,9 @@ func (m *Metrics) Snapshot() status.Snapshot {
 		AllMax:          allMax,
 		ActionCounts:    actions,
 		StatusCodes:     codes,
+		SSEClients:      m.activeSSEClients.Load(),
+		SSEEvents:       m.totalSSEEvents.Load(),
+		SSEEventRate:    sseRate,
 	}
 }
 
@@ -282,4 +339,8 @@ func (m *Metrics) Reset() {
 	m.intervalSuccess = 0
 	m.intervalError = 0
 	m.intervalLats = m.intervalLats[:0]
+
+	m.totalSSEEvents.Store(0)
+	m.sseErrors.Store(0)
+	m.intervalSSEEvents.Store(0)
 }

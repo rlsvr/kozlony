@@ -18,7 +18,12 @@ import (
 	"github.com/rlsvr/kozlony/tools/stress/runner"
 )
 
-const fieldInteractions = "interactions"
+const (
+	fieldInteractions = "interactions"
+	fieldDepth        = "depth"
+	fieldVersion      = "version"
+	fieldAuthor       = "author"
+)
 
 func TestConfigValidation(t *testing.T) {
 	cfg := runner.DefaultConfig()
@@ -63,6 +68,14 @@ func TestConfigValidation(t *testing.T) {
 	invalidWeights.EditWeight = 0
 	invalidWeights.ReadWeight = 0
 	require.Error(t, invalidWeights.Validate())
+
+	invalidWithClients := cfg
+	invalidWithClients.WithClients = -1
+	require.Error(t, invalidWithClients.Validate())
+
+	tooManyWithClients := cfg
+	tooManyWithClients.WithClients = 10001
+	require.Error(t, tooManyWithClients.Validate())
 }
 
 func TestParseFlags(t *testing.T) {
@@ -70,6 +83,7 @@ func TestParseFlags(t *testing.T) {
 		"-url", "http://test-server:9090",
 		"-users", "1000000",
 		"-workers", "150",
+		"-with-clients", "25",
 		"-rps", "45.5",
 		"-min-think", "500ms", // Deprecated flag handled gracefully
 		"-max-think", "1500ms",
@@ -84,6 +98,7 @@ func TestParseFlags(t *testing.T) {
 	assert.Equal(t, "http://test-server:9090", cfg.TargetURL)
 	assert.Equal(t, 1000000, cfg.Users)
 	assert.Equal(t, 150, cfg.Workers)
+	assert.Equal(t, 25, cfg.WithClients)
 	assert.InDelta(t, 45.5, cfg.RPS, 0.001)
 	assert.Equal(t, 50, cfg.MinBody)
 	assert.Equal(t, 500, cfg.MaxBody)
@@ -137,10 +152,10 @@ func TestInteractionPoolSeed(t *testing.T) {
 		resp := map[string]any{
 			fieldInteractions: []map[string]any{
 				{
-					"id":      fakeID.String(),
-					"depth":   0,
-					"version": 1,
-					"author":  "alice",
+					"id":         fakeID.String(),
+					fieldDepth:   0,
+					fieldVersion: 1,
+					fieldAuthor:  "alice",
 				},
 			},
 		}
@@ -186,12 +201,17 @@ func TestMetricsRecordingAndReporting(t *testing.T) {
 	m.Record("create_reply", http.StatusCreated, 10*time.Millisecond, nil)
 	m.Record("edit", http.StatusOK, 5*time.Millisecond, nil)
 	m.Record("edit", http.StatusConflict, 6*time.Millisecond, errors.New("conflict"))
+	m.SetSSEClients(5)
+	m.RecordSSEEvent()
+	m.RecordSSEEvent()
+	m.RecordSSEError()
 
 	var buf bytes.Buffer
 	m.PrintLive(&buf, 10)
 	liveStr := buf.String()
 	assert.Contains(t, liveStr, "rps=")
 	assert.Contains(t, liveStr, "pool=10")
+	assert.Contains(t, liveStr, "sse=5")
 
 	buf.Reset()
 	m.PrintSummary(&buf, 10)
@@ -201,6 +221,8 @@ func TestMetricsRecordingAndReporting(t *testing.T) {
 	assert.Contains(t, sumStr, "create_reply")
 	assert.Contains(t, sumStr, "HTTP 201")
 	assert.Contains(t, sumStr, "HTTP 409")
+	assert.Contains(t, sumStr, "--- Real-Time SSE Clients ---")
+	assert.Contains(t, sumStr, "Events Received:")
 }
 
 func TestPressureController(t *testing.T) {
@@ -210,10 +232,10 @@ func TestPressureController(t *testing.T) {
 		switch r.Method {
 		case http.MethodPost:
 			created := map[string]any{
-				"id":      uuid.New().String(),
-				"depth":   0,
-				"version": 1,
-				"author":  "tester",
+				"id":         uuid.New().String(),
+				fieldDepth:   0,
+				fieldVersion: 1,
+				fieldAuthor:  "tester",
 			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(created)
@@ -253,4 +275,69 @@ func TestPressureController(t *testing.T) {
 
 	assert.Positive(t, pool.Size())
 	assert.Contains(t, buf.String(), "STRESS TEST SUMMARY")
+}
+
+func TestPressureControllerWithClients(t *testing.T) {
+	// Mock HTTP server responding to write traffic and streaming SSE events
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/interactions/events" {
+			assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+				// Send mock event
+				_, _ = w.Write([]byte("data: {\"id\":\"mock-event\"}\n\n"))
+				f.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			created := map[string]any{
+				"id":         uuid.New().String(),
+				fieldDepth:   0,
+				fieldVersion: 1,
+				fieldAuthor:  "tester",
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(created)
+		case http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "updated"})
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{fieldInteractions: []any{}})
+		}
+	}))
+	defer server.Close()
+
+	cfg := runner.Config{
+		TargetURL:      server.URL,
+		Users:          2,
+		Workers:        5,
+		WithClients:    3,
+		RPS:            50,
+		Duration:       150 * time.Millisecond,
+		GroupID:        "root",
+		ReportInterval: 50 * time.Millisecond,
+		RootWeight:     50,
+		ReplyWeight:    50,
+	}
+
+	pool := runner.NewInteractionPool(50)
+	metrics := runner.NewMetrics()
+	controller := runner.NewPressureController(cfg, pool, metrics)
+
+	var buf bytes.Buffer
+	err := controller.Run(context.Background(), &buf)
+	require.NoError(t, err)
+
+	snap := metrics.Snapshot()
+	assert.GreaterOrEqual(t, snap.SSEEvents, int64(3))
+	assert.Contains(t, buf.String(), "--- Real-Time SSE Clients ---")
 }

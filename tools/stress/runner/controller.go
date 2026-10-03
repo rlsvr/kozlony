@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,6 +30,7 @@ type PressureController struct {
 	metrics    *Metrics
 	limiter    *rate.Limiter
 	httpClient *http.Client
+	sseClient  *http.Client
 }
 
 // NewPressureController creates a load generator controller.
@@ -47,9 +49,17 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 		limiter = rate.NewLimiter(rate.Limit(cfg.RPS), burst)
 	}
 
+	totalSockets := poolWorkers * 2
+	if cfg.WithClients > 0 {
+		totalSockets += cfg.WithClients * 2
+	}
+	if totalSockets < 200 {
+		totalSockets = 200
+	}
+
 	transport := &http.Transport{
-		MaxIdleConns:        poolWorkers * 2,
-		MaxIdleConnsPerHost: poolWorkers * 2,
+		MaxIdleConns:        totalSockets,
+		MaxIdleConnsPerHost: totalSockets,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
 	}
@@ -59,12 +69,18 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 		Timeout:   10 * time.Second,
 	}
 
+	sseClient := &http.Client{
+		Transport: transport,
+		Timeout:   0, // Streaming responses must not have a client-level timeout
+	}
+
 	return &PressureController{
 		cfg:        cfg,
 		pool:       pool,
 		metrics:    metrics,
 		limiter:    limiter,
 		httpClient: httpClient,
+		sseClient:  sseClient,
 	}
 }
 
@@ -119,6 +135,19 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 			}
 		}
 	}()
+
+	// Spawn SSE listener clients if configured
+	var sseWg sync.WaitGroup
+	if c.cfg.WithClients > 0 {
+		c.metrics.SetSSEClients(c.cfg.WithClients)
+		for i := 0; i < c.cfg.WithClients; i++ {
+			sseWg.Add(1)
+			go func(clientID int) {
+				defer sseWg.Done()
+				c.runSSEClient(runCtx, clientID)
+			}(i)
+		}
+	}
 
 	numWorkers := c.cfg.Workers
 	if numWorkers <= 0 {
@@ -178,6 +207,8 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 
 	dispatchWg.Wait()
 	_ = wPool.Wait(ctx)
+	sseWg.Wait()
+	c.metrics.SetSSEClients(0)
 	<-reporterDone
 
 	_ = status.SaveRunnerStatus(status.DefaultStatusFilePath, status.RunnerStatus{
@@ -422,4 +453,77 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 	defer func() { _ = resp.Body.Close() }()
 
 	c.metrics.Record(action, resp.StatusCode, lat, nil)
+}
+
+func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
+	reqURL := fmt.Sprintf("%s/v1/interactions/events?group_id=%s", c.cfg.TargetURL, c.cfg.GroupID)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			c.metrics.RecordSSEError()
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+
+		resp, err := c.sseClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.metrics.RecordSSEError()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			c.metrics.RecordSSEError()
+			_ = resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+
+		c.readSSEStream(ctx, resp.Body)
+		_ = resp.Body.Close()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func (c *PressureController) readSSEStream(ctx context.Context, body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
+		line := scanner.Bytes()
+		if bytes.HasPrefix(line, []byte("data:")) {
+			c.metrics.RecordSSEEvent()
+		}
+	}
+
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		c.metrics.RecordSSEError()
+	}
 }

@@ -24,6 +24,9 @@ func main() {
 	fmt.Printf("Target URL:       %s\n", cfg.TargetURL)
 	fmt.Printf("Simulated Users:  %d distinct user accounts\n", cfg.Users)
 	fmt.Printf("Worker Pool:      %d concurrent workers (continuous pressure)\n", cfg.Workers)
+	if cfg.WithClients > 0 {
+		fmt.Printf("SSE Clients:      %d concurrent live stream subscribers\n", cfg.WithClients)
+	}
 	if cfg.RPS > 0 {
 		fmt.Printf("Target RPS:       %.1f req/s\n", cfg.RPS)
 	} else {
