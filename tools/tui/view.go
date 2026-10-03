@@ -41,6 +41,10 @@ var (
 	styleMuted = lipgloss.NewStyle().
 			Foreground(colorMuted)
 
+	styleAccent = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colorAccent)
+
 	styleOK = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(colorOK)
@@ -88,6 +92,9 @@ func renderHeader(m Model) string {
 	if m.runnerActive {
 		info = fmt.Sprintf("target: %s | users: %d | rps_target: %.0f | pool: %d",
 			m.runnerStatus.TargetURL, m.runnerStatus.Users, m.runnerStatus.TargetRPS, m.runnerStatus.PoolSize)
+		if m.metricsSnap.SSEClients > 0 {
+			info += fmt.Sprintf(" | sse: %d", m.metricsSnap.SSEClients)
+		}
 	} else {
 		info = fmt.Sprintf("target: %s | status_file: %s", m.targetURL, m.statusFile)
 	}
@@ -137,6 +144,17 @@ func renderWorkloadCard(m Model, cardWidth int) string {
 		formatDuration(snap.IntervalP99),
 		formatDuration(snap.IntervalMax),
 	)
+
+	// SSE streaming telemetry line
+	var sseLine string
+	if snap.SSEClients > 0 || snap.SSEEvents > 0 {
+		sseLine = fmt.Sprintf("  %-16s %s active subscribers | %s events received (%6.1f ev/s)",
+			styleMuted.Render("Live SSE Stream:"),
+			styleAccent.Render(fmt.Sprintf("%d", snap.SSEClients)),
+			styleOK.Render(fmt.Sprintf("%d", snap.SSEEvents)),
+			snap.SSEEventRate,
+		)
+	}
 
 	// Action Breakdown & Status Codes side by side
 	colWidth := (cardWidth - 8) / 2
@@ -202,14 +220,18 @@ func renderWorkloadCard(m Model, cardWidth int) string {
 		lipgloss.NewStyle().Width(colWidth).Render(rightCol),
 	)
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
+	cardItems := []string{
 		cardTitle,
 		"",
 		line1,
 		latLine,
-		"",
-		tables,
-	)
+	}
+	if sseLine != "" {
+		cardItems = append(cardItems, sseLine)
+	}
+	cardItems = append(cardItems, "", tables)
+
+	body := lipgloss.JoinVertical(lipgloss.Left, cardItems...)
 
 	return styleCard.Width(cardWidth).Render(body)
 }
