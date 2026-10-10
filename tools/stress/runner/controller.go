@@ -161,26 +161,24 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 	q := queue.New[struct{}](qCapacity)
 
 	var workerSeq atomic.Int64
+	selector := newUserSelector(c.cfg)
+
 	wPool := worker.Run(runCtx, numWorkers, q, func(workerCtx context.Context, _ struct{}) {
 		id := workerSeq.Add(1)
 		rng := rand.New(rand.NewSource(time.Now().UnixNano() + id*1000)) //nolint:gosec
-		author := fmt.Sprintf("user-%05d", rng.Intn(c.cfg.Users)+1)
-		action := c.selectAction(rng)
-		c.executeAction(workerCtx, rng, author, action)
 
-		// Simulated per-user cooldown. A worker that just acted waits before acting again,
-		// so the offered load is bounded by workers/think-time rather than by how fast the
-		// service responds. This is what models a large population posting occasionally.
-		if c.cfg.MaxThink > 0 || c.cfg.MinThink > 0 {
-			think := c.cfg.MinThink
-			if span := c.cfg.MaxThink - c.cfg.MinThink; span > 0 {
-				think += time.Duration(rng.Int63n(int64(span)))
-			}
+		author, wait := selector.pick(rng)
+		for author == "" {
 			select {
 			case <-workerCtx.Done():
-			case <-time.After(think):
+				return
+			case <-time.After(wait):
 			}
+			author, wait = selector.pick(rng)
 		}
+
+		action := c.selectAction(rng)
+		c.executeAction(workerCtx, rng, author, action)
 	})
 
 	// Dispatcher goroutine: feeds the bounded queue according to RPS or unconstrained
@@ -238,6 +236,84 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 
 	c.metrics.PrintSummary(out, c.pool.Size())
 	return nil
+}
+
+// userSelector tracks per-user cooldowns. Think time belongs to a simulated user, not to
+// the worker executing it: a worker that has just acted as one user moves on to another, so
+// a large user population keeps every worker saturated and the cooldown does not bound
+// throughput. Only when there are fewer users than workers does it actually throttle.
+type userSelector struct {
+	users   int
+	min     time.Duration
+	max     time.Duration
+	ready   sync.Map // user -> time.Time when that user may next act
+	nowFunc func() time.Time
+}
+
+func newUserSelector(cfg Config) *userSelector {
+	return &userSelector{
+		users:   cfg.Users,
+		min:     cfg.MinThink,
+		max:     cfg.MaxThink,
+		nowFunc: time.Now,
+	}
+}
+
+func (s *userSelector) enabled() bool { return s.min > 0 || s.max > 0 }
+
+func (s *userSelector) thinkDelay(rng *rand.Rand) time.Duration {
+	if span := s.max - s.min; span > 0 {
+		return s.min + time.Duration(rng.Int63n(int64(span)))
+	}
+	return s.min
+}
+
+func (s *userSelector) name(rng *rand.Rand) string {
+	return fmt.Sprintf("user-%05d", rng.Intn(s.users)+1)
+}
+
+// pick returns a user able to act now, or how long to wait before one is available. It never
+// returns a busy user: when a small population leaves every sampled user thinking, the caller
+// is told to wait and calls again, so the cooldown is honoured rather than bypassed.
+func (s *userSelector) pick(rng *rand.Rand) (string, time.Duration) {
+	if !s.enabled() {
+		return s.name(rng), 0
+	}
+
+	now := s.nowFunc()
+	for range 8 {
+		author := s.name(rng)
+		if v, busy := s.ready.Load(author); busy {
+			if readyAt, ok := v.(time.Time); ok && now.Before(readyAt) {
+				continue // still thinking, try a different user
+			}
+		}
+		s.ready.Store(author, now.Add(s.thinkDelay(rng)))
+		return author, 0
+	}
+
+	// Every sampled user is still thinking. Report when one frees up instead of acting as a
+	// busy one; otherwise a population smaller than the worker count would ignore the
+	// cooldown entirely and overshoot the offered-load ceiling it advertises.
+	return "", s.untilEarliestReady(now)
+}
+
+// untilEarliestReady handles the small-population case where every sampled user is busy.
+func (s *userSelector) untilEarliestReady(now time.Time) time.Duration {
+	var earliest time.Time
+	s.ready.Range(func(_, v any) bool {
+		if readyAt, ok := v.(time.Time); ok && (earliest.IsZero() || readyAt.Before(earliest)) {
+			earliest = readyAt
+		}
+		return true
+	})
+	if earliest.IsZero() {
+		return 0
+	}
+	if wait := earliest.Sub(now); wait > 0 {
+		return wait
+	}
+	return 0
 }
 
 type actionType string

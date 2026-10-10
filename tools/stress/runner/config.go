@@ -30,15 +30,24 @@ type Config struct {
 	MaxThink       time.Duration // Simulated per-user cooldown before its next request
 }
 
-// ThinkCeiling reports the highest request rate the configured worker count can sustain
-// once think time is applied. With think time set, -rps above this is unreachable no matter
-// how fast the service is, because the workers physically cannot issue requests faster.
+// ThinkCeiling reports the highest request rate this configuration can sustain.
+//
+// Think time is a property of a user, not of a worker: while one user is thinking, the
+// worker is free to act as another. So it only limits offered load when there are no
+// enough distinct users to keep every worker busy. With a large user population the
+// ceiling is set by the workers and the service, not by the cooldown.
 func (c Config) ThinkCeiling() float64 {
 	avg := (c.MinThink + c.MaxThink) / 2
 	if avg <= 0 {
 		return 0
 	}
-	return float64(c.Workers) / avg.Seconds()
+
+	byPopulation := float64(c.Users) / avg.Seconds()
+	if byPopulation <= float64(c.Workers) {
+		return byPopulation
+	}
+	// Every worker can stay busy, so cooldown no longer bounds the rate.
+	return 0
 }
 
 // DefaultConfig returns reasonable default settings for a stress test session.
