@@ -25,7 +25,20 @@ type Config struct {
 	ReplyWeight    int
 	EditWeight     int
 	ReadWeight     int
-	WithClients    int // Number of concurrent real-time SSE stream subscriber clients (default: 0)
+	WithClients    int           // Number of concurrent real-time SSE stream subscriber clients (default: 0)
+	MinThink       time.Duration // Simulated per-user cooldown before its next request
+	MaxThink       time.Duration // Simulated per-user cooldown before its next request
+}
+
+// ThinkCeiling reports the highest request rate the configured worker count can sustain
+// once think time is applied. With think time set, -rps above this is unreachable no matter
+// how fast the service is, because the workers physically cannot issue requests faster.
+func (c Config) ThinkCeiling() float64 {
+	avg := (c.MinThink + c.MaxThink) / 2
+	if avg <= 0 {
+		return 0
+	}
+	return float64(c.Workers) / avg.Seconds()
 }
 
 // DefaultConfig returns reasonable default settings for a stress test session.
@@ -53,14 +66,12 @@ func ParseFlags(args []string) (Config, error) {
 	cfg := DefaultConfig()
 	fs := flag.NewFlagSet("stresstest", flag.ContinueOnError)
 
-	var deprecatedMinThink, deprecatedMaxThink time.Duration
-
 	fs.StringVar(&cfg.TargetURL, "url", cfg.TargetURL, "Base URL of the Kozlony API")
 	fs.IntVar(&cfg.Users, "users", cfg.Users, "Simulated user identity population size (e.g. 1000000)")
 	fs.IntVar(&cfg.Workers, "workers", cfg.Workers, "Execution worker pool concurrency (default: 200, max: 2000)")
 	fs.Float64Var(&cfg.RPS, "rps", cfg.RPS, "Global max requests per second ceiling (0 for unconstrained)")
-	fs.DurationVar(&deprecatedMinThink, "min-think", 0, "Deprecated: no-op (workers maintain continuous pressure without sleeping)")
-	fs.DurationVar(&deprecatedMaxThink, "max-think", 0, "Deprecated: no-op (workers maintain continuous pressure without sleeping)")
+	fs.DurationVar(&cfg.MinThink, "min-think", 0, "Simulated per-user cooldown before the next request (models many users posting occasionally rather than a bot hammering)")
+	fs.DurationVar(&cfg.MaxThink, "max-think", 0, "Upper bound for -min-think; both zero means continuous pressure")
 	fs.IntVar(&cfg.MinBody, "min-body", cfg.MinBody, "Minimum interaction body character length (default: 0)")
 	fs.IntVar(&cfg.MaxBody, "max-body", cfg.MaxBody, "Maximum interaction body character length (default: 1000)")
 	fs.DurationVar(&cfg.Duration, "duration", cfg.Duration, "Total test duration (0 for indefinite until SIGINT)")
@@ -111,6 +122,12 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxBody > 65535 {
 		return fmt.Errorf("max-body (%d) exceeds API limit of 65535", c.MaxBody)
+	}
+	if c.MinThink < 0 || c.MaxThink < 0 {
+		return errors.New("think times cannot be negative")
+	}
+	if c.MinThink > 0 && c.MaxThink > 0 && c.MinThink > c.MaxThink {
+		return fmt.Errorf("min-think (%v) cannot exceed max-think (%v)", c.MinThink, c.MaxThink)
 	}
 	if c.RPS < 0 {
 		return errors.New("rps must be non-negative")

@@ -167,6 +167,20 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 		author := fmt.Sprintf("user-%05d", rng.Intn(c.cfg.Users)+1)
 		action := c.selectAction(rng)
 		c.executeAction(workerCtx, rng, author, action)
+
+		// Simulated per-user cooldown. A worker that just acted waits before acting again,
+		// so the offered load is bounded by workers/think-time rather than by how fast the
+		// service responds. This is what models a large population posting occasionally.
+		if c.cfg.MaxThink > 0 || c.cfg.MinThink > 0 {
+			think := c.cfg.MinThink
+			if span := c.cfg.MaxThink - c.cfg.MinThink; span > 0 {
+				think += time.Duration(rng.Int63n(int64(span)))
+			}
+			select {
+			case <-workerCtx.Done():
+			case <-time.After(think):
+			}
+		}
 	})
 
 	// Dispatcher goroutine: feeds the bounded queue according to RPS or unconstrained

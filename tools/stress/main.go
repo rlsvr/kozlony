@@ -32,6 +32,16 @@ func main() {
 	} else {
 		fmt.Printf("Target RPS:       unconstrained (maximum throughput)\n")
 	}
+	if cfg.MinThink > 0 || cfg.MaxThink > 0 {
+		fmt.Printf("Think Time:       %v - %v per user\n", cfg.MinThink, cfg.MaxThink)
+		if ceiling := cfg.ThinkCeiling(); ceiling > 0 {
+			fmt.Printf("Offered Load:     ~%.0f req/s ceiling from %d workers\n", ceiling, cfg.Workers)
+		}
+		if cfg.RPS > 0 && cfg.ThinkCeiling() > 0 && cfg.RPS > cfg.ThinkCeiling() {
+			fmt.Printf("NOTE: -rps %.0f is unreachable; think time caps offered load at ~%.0f req/s.\n",
+				cfg.RPS, cfg.ThinkCeiling())
+		}
+	}
 	if cfg.Duration > 0 {
 		fmt.Printf("Duration:         %v\n", cfg.Duration)
 	} else {
