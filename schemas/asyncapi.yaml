@@ -43,6 +43,19 @@ channels:
       createInteractionCommand:
         $ref: "#/components/messages/CreateInteractionCommand"
 
+  replyCountsRecalculated:
+    address: "BOARD.{groupId}.counter.replied"
+    description: >-
+      Absolute reply counts recalculated after a batch of interactions is committed.
+      Deliberately outside the "evt." namespace so the drainer, which consumes
+      BOARD.{groupId}.evt.>, never consumes its own derived output.
+    parameters:
+      groupId:
+        $ref: "#/components/parameters/groupId"
+    messages:
+      replyCountsRecalculatedEvent:
+        $ref: "#/components/messages/ReplyCountsRecalculatedEvent"
+
 operations:
   sendInteractionCreated:
     action: "send"
@@ -61,6 +74,18 @@ operations:
     channel:
       $ref: "#/channels/createInteractionCommand"
     summary: "Receive create interaction command."
+
+  sendReplyCountsRecalculated:
+    action: "send"
+    channel:
+      $ref: "#/channels/replyCountsRecalculated"
+    summary: "Publish recalculated reply counts."
+
+  receiveReplyCountsRecalculated:
+    action: "receive"
+    channel:
+      $ref: "#/channels/replyCountsRecalculated"
+    summary: "Receive recalculated reply counts."
 
 components:
   parameters:
@@ -88,3 +113,12 @@ components:
       summary: Ingestion command for an interaction.
       payload:
         $ref: "./commands/create-interaction/v0.1.0.json"
+
+    ReplyCountsRecalculatedEvent:
+      name: reply_counts_recalculated
+      title: Reply Counts Recalculated Event
+      summary: >-
+        Absolute reply counts for the parents touched by a committed batch. Counts are
+        totals rather than deltas, so redelivery is idempotent.
+      payload:
+        $ref: "./events/reply-counts-recalculated/v0.1.0.json"

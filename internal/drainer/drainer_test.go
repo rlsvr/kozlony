@@ -21,6 +21,11 @@ import (
 	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
+const (
+	testGroupID = "root"
+	testAuthor  = "Alice"
+)
+
 type fakeMsg struct {
 	subject string
 	data    []byte
@@ -82,10 +87,10 @@ func TestProcessBatch_Success(t *testing.T) {
 
 	id := uuid.Must(uuid.NewV7()).String()
 	evt := events.InteractionCreatedEvent{
-		Author:    "Alice",
+		Author:    testAuthor,
 		Body:      "Batch message",
 		CreatedAt: time.Now().UTC(),
-		GroupID:   "root",
+		GroupID:   testGroupID,
 		ID:        id,
 		Version:   1,
 	}
@@ -102,15 +107,15 @@ func TestProcessBatch_Success(t *testing.T) {
 		Return(batch, nil)
 
 	mockRepo.EXPECT().
-		InsertBatch(gomock.Any(), gomock.Len(1)).
-		DoAndReturn(func(_ context.Context, items []*database.Interaction) error {
+		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
 			if len(items) != 1 {
 				t.Fatalf("expected 1 item, got %d", len(items))
 			}
 			if items[0].ID.String() != id {
 				t.Errorf("expected ID %s, got %s", id, items[0].ID.String())
 			}
-			return nil
+			return map[uuid.UUID]int{}, nil
 		})
 
 	count, err := d.ProcessBatch(context.Background())
@@ -141,7 +146,7 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 		Author:    "Bob",
 		Body:      "Message to fail",
 		CreatedAt: time.Now().UTC(),
-		GroupID:   "root",
+		GroupID:   testGroupID,
 		ID:        uuid.Must(uuid.NewV7()).String(),
 		Version:   1,
 	}
@@ -158,8 +163,8 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 		Return(batch, nil)
 
 	mockRepo.EXPECT().
-		InsertBatch(gomock.Any(), gomock.Any()).
-		Return(errors.New("db connection failure"))
+		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("db connection failure"))
 
 	count, err := d.ProcessBatch(context.Background())
 	if err == nil {

@@ -183,6 +183,35 @@ func (m *MockRepository) EXPECT() *MockRepositoryMockRecorder {
 	return m.recorder
 }
 
+// ApplyReplyCounts mocks base method.
+func (m *MockRepository) ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ApplyReplyCounts", ctx, counts)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ApplyReplyCounts indicates an expected call of ApplyReplyCounts.
+func (mr *MockRepositoryMockRecorder) ApplyReplyCounts(ctx, counts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyReplyCounts", reflect.TypeOf((*MockRepository)(nil).ApplyReplyCounts), ctx, counts)
+}
+
+// CountDescendants mocks base method.
+func (m *MockRepository) CountDescendants(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CountDescendants", ctx, ids)
+	ret0, _ := ret[0].(map[uuid.UUID]int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CountDescendants indicates an expected call of CountDescendants.
+func (mr *MockRepositoryMockRecorder) CountDescendants(ctx, ids any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CountDescendants", reflect.TypeOf((*MockRepository)(nil).CountDescendants), ctx, ids)
+}
+
 // GetByID mocks base method.
 func (m *MockRepository) GetByID(ctx context.Context, id uuid.UUID) (*database.Interaction, error) {
 	m.ctrl.T.Helper()
@@ -241,6 +270,21 @@ func (mr *MockRepositoryMockRecorder) InsertBatch(ctx, items any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InsertBatch", reflect.TypeOf((*MockRepository)(nil).InsertBatch), ctx, items)
 }
 
+// InsertBatchWithCounts mocks base method.
+func (m *MockRepository) InsertBatchWithCounts(ctx context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InsertBatchWithCounts", ctx, items)
+	ret0, _ := ret[0].(map[uuid.UUID]int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// InsertBatchWithCounts indicates an expected call of InsertBatchWithCounts.
+func (mr *MockRepositoryMockRecorder) InsertBatchWithCounts(ctx, items any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InsertBatchWithCounts", reflect.TypeOf((*MockRepository)(nil).InsertBatchWithCounts), ctx, items)
+}
+
 // ListFeed mocks base method.
 func (m *MockRepository) ListFeed(ctx context.Context, groupID string, limit int, before *time.Time) ([]*database.Interaction, error) {
 	m.ctrl.T.Helper()
@@ -283,4 +327,48 @@ func (m *MockRepository) Update(ctx context.Context, id uuid.UUID, expectedVersi
 func (mr *MockRepositoryMockRecorder) Update(ctx, id, expectedVersion, title, body any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockRepository)(nil).Update), ctx, id, expectedVersion, title, body)
+}
+
+// MockrowQuerier is a mock of rowQuerier interface.
+type MockrowQuerier struct {
+	ctrl     *gomock.Controller
+	recorder *MockrowQuerierMockRecorder
+	isgomock struct{}
+}
+
+// MockrowQuerierMockRecorder is the mock recorder for MockrowQuerier.
+type MockrowQuerierMockRecorder struct {
+	mock *MockrowQuerier
+}
+
+// NewMockrowQuerier creates a new mock instance.
+func NewMockrowQuerier(ctrl *gomock.Controller) *MockrowQuerier {
+	mock := &MockrowQuerier{ctrl: ctrl}
+	mock.recorder = &MockrowQuerierMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockrowQuerier) EXPECT() *MockrowQuerierMockRecorder {
+	return m.recorder
+}
+
+// Query mocks base method.
+func (m *MockrowQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, sql}
+	for _, a := range args {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Query", varargs...)
+	ret0, _ := ret[0].(pgx.Rows)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Query indicates an expected call of Query.
+func (mr *MockrowQuerierMockRecorder) Query(ctx, sql any, args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, sql}, args...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Query", reflect.TypeOf((*MockrowQuerier)(nil).Query), varargs...)
 }

@@ -14,6 +14,7 @@ import (
 	reflect "reflect"
 
 	jetstream "github.com/nats-io/nats.go/jetstream"
+	events "github.com/rlsvr/kozlony/internal/messaging/events"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -97,4 +98,42 @@ func (m *MockDLQPublisher) PublishDLQ(ctx context.Context, originalSubject strin
 func (mr *MockDLQPublisherMockRecorder) PublishDLQ(ctx, originalSubject, data, reason any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PublishDLQ", reflect.TypeOf((*MockDLQPublisher)(nil).PublishDLQ), ctx, originalSubject, data, reason)
+}
+
+// MockReplyCountPublisher is a mock of ReplyCountPublisher interface.
+type MockReplyCountPublisher struct {
+	ctrl     *gomock.Controller
+	recorder *MockReplyCountPublisherMockRecorder
+	isgomock struct{}
+}
+
+// MockReplyCountPublisherMockRecorder is the mock recorder for MockReplyCountPublisher.
+type MockReplyCountPublisherMockRecorder struct {
+	mock *MockReplyCountPublisher
+}
+
+// NewMockReplyCountPublisher creates a new mock instance.
+func NewMockReplyCountPublisher(ctrl *gomock.Controller) *MockReplyCountPublisher {
+	mock := &MockReplyCountPublisher{ctrl: ctrl}
+	mock.recorder = &MockReplyCountPublisherMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockReplyCountPublisher) EXPECT() *MockReplyCountPublisherMockRecorder {
+	return m.recorder
+}
+
+// PublishReplyCountsRecalculated mocks base method.
+func (m *MockReplyCountPublisher) PublishReplyCountsRecalculated(ctx context.Context, evt *events.ReplyCountsRecalculatedEvent) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PublishReplyCountsRecalculated", ctx, evt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PublishReplyCountsRecalculated indicates an expected call of PublishReplyCountsRecalculated.
+func (mr *MockReplyCountPublisherMockRecorder) PublishReplyCountsRecalculated(ctx, evt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PublishReplyCountsRecalculated", reflect.TypeOf((*MockReplyCountPublisher)(nil).PublishReplyCountsRecalculated), ctx, evt)
 }

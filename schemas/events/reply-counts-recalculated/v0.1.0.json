@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/events/reply-counts-recalculated/v0.1.0.json",
+  "title": "ReplyCountsRecalculatedEvent",
+  "description": "Event emitted after a batch of interactions is committed, carrying absolute reply counts to be applied to the affected parents.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "group_id",
+    "counts"
+  ],
+  "properties": {
+    "group_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Board or group identifier."
+    },
+    "counts": {
+      "type": "object",
+      "description": "Absolute descendant reply count keyed by interaction UUID. Counts are total descendants, never a delta, so redelivery is idempotent.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  }
+}

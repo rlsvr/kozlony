@@ -47,6 +47,10 @@ asyncapi-gen:
 		-o internal/messaging/events/interaction_edited.go \
 		schemas/events/interaction-edited/v0.1.0.json
 	$(GO_JSONSCHEMA) $(ASYNCAPI_CODEGEN_FLAGS) \
+		--package events \
+		-o internal/messaging/events/reply_counts_recalculated.go \
+		schemas/events/reply-counts-recalculated/v0.1.0.json
+	$(GO_JSONSCHEMA) $(ASYNCAPI_CODEGEN_FLAGS) \
 		--package commands \
 		-o internal/messaging/commands/create_interaction.go \
 		schemas/commands/create-interaction/v0.1.0.json

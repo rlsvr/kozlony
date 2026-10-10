@@ -74,18 +74,34 @@ func main() {
 	}
 
 	var pub handler.Publisher
+	var msgPublisher *messaging.Publisher
 	if msgClient != nil {
-		pub = messaging.NewPublisher(msgClient)
+		msgPublisher = messaging.NewPublisher(msgClient)
+		pub = msgPublisher
 	}
 
+	// The counter consumer applies recalculated reply counts in its own small transaction.
+	// It is stopped during shutdown before the database pool closes, so an in-flight
+	// ApplyReplyCounts can never race a closed pool.
+	var replyCounter *drainer.Counter
 	if msgClient != nil && repo != nil {
+		counterConsumer, err := messaging.NewCounterConsumer(ctx, msgClient)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to create JetStream counter consumer")
+		} else {
+			replyCounter = drainer.NewCounter(counterConsumer, repo, cfg)
+			replyCounter.Start(ctx)
+		}
+
 		drainerConsumer, err := messaging.NewDrainerConsumer(ctx, msgClient)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
 		} else {
-			// drainer.Start constructs the Drainer and launches its worker loop in a
-			// background goroutine; do not also call Run here or the loop runs twice.
-			drainer.Start(ctx, drainerConsumer, repo, msgClient, cfg)
+			// drainer.StartWithCountPublisher constructs the Drainer and launches its
+			// worker loop in a background goroutine; do not also call Run here or the
+			// loop runs twice. The drainer publishes recalculated reply counts after
+			// each committed batch, keeping reply_count writes out of the insert path.
+			drainer.StartWithCountPublisher(ctx, drainerConsumer, repo, msgClient, msgPublisher, cfg)
 		}
 	}
 
@@ -105,6 +121,12 @@ func main() {
 	log.Info().Msg("shutting down HTTP server...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
+
+	// Stop the counter workers before the database pool is closed by the deferred
+	// dbPool.Close(), so an in-flight ApplyReplyCounts cannot race a closing pool.
+	if replyCounter != nil {
+		replyCounter.Stop()
+	}
 
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		log.Fatal().Err(err).Msg("server forced to shutdown")

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rlsvr/kozlony/internal/config"
 	"github.com/rlsvr/kozlony/internal/database"
+	"github.com/rlsvr/kozlony/internal/messaging"
 	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
@@ -28,18 +29,46 @@ type DLQPublisher interface {
 	PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error
 }
 
+// ReplyCountPublisher emits recalculated reply counts for the counter consumer.
+type ReplyCountPublisher interface {
+	PublishReplyCountsRecalculated(ctx context.Context, evt *events.ReplyCountsRecalculatedEvent) error
+}
+
 // Drainer micro-batches interaction events from NATS JetStream and bulk-inserts them into PostgreSQL.
 type Drainer struct {
-	fetcher       BatchFetcher
-	repo          database.Repository
-	dlq           DLQPublisher
-	batchSize     int
-	flushInterval time.Duration
-	workers       int
+	fetcher        BatchFetcher
+	repo           database.Repository
+	dlq            DLQPublisher
+	countPublisher ReplyCountPublisher
+	batchSize      int
+	flushInterval  time.Duration
+	workers        int
 }
 
 // New creates a new Drainer instance.
 func New(fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
+	return newDrainer(fetcher, repo, dlq, nil, cfg)
+}
+
+// NewWithCountPublisher creates a Drainer that emits recalculated reply counts after each
+// committed batch. The publisher may be nil, in which case counts are skipped.
+func NewWithCountPublisher(
+	fetcher BatchFetcher,
+	repo database.Repository,
+	dlq DLQPublisher,
+	countPublisher ReplyCountPublisher,
+	cfg *config.Config,
+) *Drainer {
+	return newDrainer(fetcher, repo, dlq, countPublisher, cfg)
+}
+
+func newDrainer(
+	fetcher BatchFetcher,
+	repo database.Repository,
+	dlq DLQPublisher,
+	countPublisher ReplyCountPublisher,
+	cfg *config.Config,
+) *Drainer {
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	workers := 1
@@ -56,12 +85,13 @@ func New(fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *
 	}
 
 	return &Drainer{
-		fetcher:       fetcher,
-		repo:          repo,
-		dlq:           dlq,
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		workers:       workers,
+		fetcher:        fetcher,
+		repo:           repo,
+		dlq:            dlq,
+		countPublisher: countPublisher,
+		batchSize:      batchSize,
+		flushInterval:  flushInterval,
+		workers:        workers,
 	}
 }
 
@@ -108,7 +138,8 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	if err := d.repo.InsertBatch(ctx, interactions); err != nil {
+	counts, err := d.repo.InsertBatchWithCounts(ctx, interactions)
+	if err != nil {
 		log.Error().Err(err).Int("batch_size", len(interactions)).Msg("failed to insert batch into postgres, naking messages")
 		for _, m := range rawMsgs {
 			_ = m.Nak()
@@ -116,12 +147,73 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("insert batch: %w", err)
 	}
 
+	// Only ack after the rows are durably committed. The reply count event is published
+	// after that too: publishing it first would announce counts for rows that may not
+	// exist yet if the transaction rolls back.
 	for _, m := range rawMsgs {
 		_ = m.Ack()
 	}
 
+	d.publishReplyCounts(ctx, interactions, counts)
+
 	log.Debug().Int("count", len(interactions)).Msg("successfully drained micro-batch to postgres")
 	return len(interactions), nil
+}
+
+// publishReplyCounts emits absolute reply counts for the parents touched by a committed
+// batch. Counts are keyed per group because the counter event is subject-routed by group.
+//
+// A publish failure is logged and swallowed rather than propagated: the batch itself is
+// already committed and acked, so failing here would not roll anything back and would only
+// turn a healthy insert into a retry loop. Counts are derived data, so a missed event
+// self-heals on the next batch that touches the same parent.
+func (d *Drainer) publishReplyCounts(ctx context.Context, items []*database.Interaction, counts map[uuid.UUID]int) {
+	if d.countPublisher == nil || len(counts) == 0 {
+		return
+	}
+
+	// A parent always belongs to the same group as the replies hanging off it, so each
+	// count is attributed to the group of the reply that pulled it in. Counts whose id
+	// is not referenced by any item in the batch are skipped rather than guessed.
+	groupOfParent := make(map[uuid.UUID]string, len(counts))
+	for _, item := range items {
+		group := item.GroupID
+		if group == "" {
+			group = messaging.DefaultGroupID
+		}
+		for _, parentID := range []*uuid.UUID{item.ParentID, item.RootID} {
+			if parentID == nil {
+				continue
+			}
+			if _, known := counts[*parentID]; !known {
+				continue
+			}
+			groupOfParent[*parentID] = group
+		}
+	}
+
+	byGroup := make(map[string]map[string]int)
+	for id, total := range counts {
+		group, known := groupOfParent[id]
+		if !known {
+			continue
+		}
+		if byGroup[group] == nil {
+			byGroup[group] = make(map[string]int)
+		}
+		byGroup[group][id.String()] = total
+	}
+
+	for group, groupCounts := range byGroup {
+		evt := &events.ReplyCountsRecalculatedEvent{
+			GroupID: group,
+			Counts:  groupCounts,
+		}
+		if err := d.countPublisher.PublishReplyCountsRecalculated(ctx, evt); err != nil {
+			log.Error().Err(err).Str("group_id", group).Int("interactions", len(groupCounts)).
+				Msg("failed to publish recalculated reply counts")
+		}
+	}
 }
 
 func (d *Drainer) routeToDLQ(ctx context.Context, msg jetstream.Msg, reason string) {
@@ -186,6 +278,21 @@ func (d *Drainer) Start(ctx context.Context) {
 // Start creates a new Drainer and starts its background processing loop.
 func Start(ctx context.Context, fetcher BatchFetcher, repo database.Repository, dlq DLQPublisher, cfg *config.Config) *Drainer {
 	d := New(fetcher, repo, dlq, cfg)
+	d.Start(ctx)
+	return d
+}
+
+// StartWithCountPublisher creates a Drainer wired to publish recalculated reply counts,
+// and starts its background processing loop.
+func StartWithCountPublisher(
+	ctx context.Context,
+	fetcher BatchFetcher,
+	repo database.Repository,
+	dlq DLQPublisher,
+	countPublisher ReplyCountPublisher,
+	cfg *config.Config,
+) *Drainer {
+	d := NewWithCountPublisher(fetcher, repo, dlq, countPublisher, cfg)
 	d.Start(ctx)
 	return d
 }

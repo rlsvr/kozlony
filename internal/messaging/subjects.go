@@ -18,6 +18,11 @@ const (
 
 	// CommandCreateSuffix is the subject suffix for create commands.
 	CommandCreateSuffix = "cmd.create"
+
+	// EventReplyCountsSuffix is the subject suffix for recalculated reply counts.
+	// It is deliberately outside the "evt." namespace so the drainer (which
+	// consumes BOARD.<group>.evt.>) never consumes its own derived output.
+	EventReplyCountsSuffix = "counter.replied"
 )
 
 // SubjectInteractionCreated returns the subject for an interaction created event.
@@ -57,6 +62,20 @@ func SubjectAllCommands(stream string) string {
 // SubjectStreamFilter returns the stream-level wildcard capturing all events and commands.
 func SubjectStreamFilter(stream string) string {
 	return fmt.Sprintf("%s.>", stream)
+}
+
+// SubjectReplyCountsRecalculated returns the subject for recalculated reply counts.
+func SubjectReplyCountsRecalculated(stream, groupID string) string {
+	if groupID == "" {
+		groupID = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s.%s", stream, groupID, EventReplyCountsSuffix)
+}
+
+// SubjectAllReplyCounts returns the wildcard subject matching every reply count
+// recalculation across all groups in the stream.
+func SubjectAllReplyCounts(stream string) string {
+	return fmt.Sprintf("%s.*.%s", stream, EventReplyCountsSuffix)
 }
 
 // SubjectDeadLetter returns the dead letter subject for unprocessable messages in the stream.

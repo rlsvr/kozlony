@@ -89,6 +89,35 @@ func (p *Publisher) PublishCreateInteractionCmd(ctx context.Context, groupID str
 	return p.Publish(ctx, subject, data)
 }
 
+// PublishReplyCountsRecalculated publishes absolute reply counts for the counter consumer.
+//
+// The subject lives outside the "evt." namespace, so the drainer's filter
+// (BOARD.<group>.evt.>) never matches it and the drainer cannot consume its own output.
+// No Nats-Msg-Id is set: redelivery is already harmless because counts are absolute, not
+// deltas, and JetStream's dedup window would not span the full retry horizon anyway.
+func (p *Publisher) PublishReplyCountsRecalculated(ctx context.Context, evt *events.ReplyCountsRecalculatedEvent) error {
+	if evt == nil {
+		return errors.New("event cannot be nil")
+	}
+	if p == nil || p.Client == nil {
+		return errors.New("publisher client not initialized")
+	}
+	if len(evt.Counts) == 0 {
+		return nil
+	}
+
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return fmt.Errorf("marshal reply counts recalculated event: %w", err)
+	}
+
+	subject := SubjectReplyCountsRecalculated(p.cfg.NATSStreamName, evt.GroupID)
+	if _, err := p.Publish(ctx, subject, data); err != nil {
+		return fmt.Errorf("publish reply counts: %w", err)
+	}
+	return nil
+}
+
 // SubscribeEvents subscribes to live interaction events for a given group (or all groups if nil)
 // and returns a receive-only channel of raw JSON event payloads and a cleanup function.
 func (p *Publisher) SubscribeEvents(_ context.Context, groupID *string) (<-chan []byte, func(), error) {

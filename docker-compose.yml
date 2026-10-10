@@ -70,6 +70,7 @@ services:
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/messageboard?sslmode=disable"
       NATS_URL: "nats://nats:4222"
       NATS_CONCURRENT_SUBSCRIBERS: "8"
+      NATS_COUNTER_CONSUMER_NAME: "board-counters"
       DRAIN_BATCH_SIZE: "2000"
       DRAIN_FLUSH_INTERVAL: "100ms"
       DATABASE_MAX_CONNS: "50"
