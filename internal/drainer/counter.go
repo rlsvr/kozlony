@@ -94,6 +94,7 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 
 	var (
 		rawMsgs []jetstream.Msg
+		msgIDs  = make(map[jetstream.Msg]map[uuid.UUID]struct{})
 		counts  = make(map[uuid.UUID]int)
 	)
 
@@ -105,6 +106,7 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 			continue
 		}
 
+		mIDs := make(map[uuid.UUID]struct{}, len(evt.Counts))
 		for idStr, total := range evt.Counts {
 			id, parseErr := uuid.Parse(idStr)
 			if parseErr != nil {
@@ -114,12 +116,14 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 			if total < 0 {
 				continue
 			}
+			mIDs[id] = struct{}{}
 			// Keep the highest total: a slower batch must never overwrite a newer one.
 			if existing, seen := counts[id]; !seen || total > existing {
 				counts[id] = total
 			}
 		}
 		rawMsgs = append(rawMsgs, msg)
+		msgIDs[msg] = mIDs
 	}
 
 	if mb.Error() != nil && !errors.Is(mb.Error(), context.DeadlineExceeded) {
@@ -145,18 +149,38 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 	// A reply can be drained before the batch that creates its parent commits, so the
 	// count for that parent has nowhere to land yet. NAK with a delay rather than acking,
 	// because the batch that creates the parent emits counts for its own parent, not for
-	// itself, so nothing else would ever retry this id. Re-applying counts that already
-	// landed is harmless: they are absolute totals and the store only moves forward.
+	// itself, so nothing else would ever retry this id.
+	//
+	// Granularly NAK only messages containing missing ids. Messages whose ids all
+	// succeeded are acked immediately so a single uncommitted parent doesn't hold up
+	// or exhaust delivery attempts for unrelated counter events.
 	if len(missing) > 0 {
+		missingSet := make(map[uuid.UUID]struct{}, len(missing))
+		for _, id := range missing {
+			missingSet[id] = struct{}{}
+		}
+
 		log.Warn().
 			Int("missing", len(missing)).
 			Int("interactions", len(counts)).
-			Msg("counter: parent interaction not committed yet, redelivering after delay")
+			Msg("counter: parent interaction not committed yet, redelivering affected messages after delay")
 
+		appliedCount := len(counts) - len(missing)
 		for _, m := range rawMsgs {
-			_ = m.NakWithDelay(missingParentRetryDelay)
+			hasMissing := false
+			for id := range msgIDs[m] {
+				if _, ok := missingSet[id]; ok {
+					hasMissing = true
+					break
+				}
+			}
+			if hasMissing {
+				_ = m.NakWithDelay(missingParentRetryDelay)
+			} else {
+				_ = m.Ack()
+			}
 		}
-		return 0, nil
+		return appliedCount, nil
 	}
 
 	for _, m := range rawMsgs {

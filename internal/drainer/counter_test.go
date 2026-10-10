@@ -490,6 +490,50 @@ func TestCounter_AppliesAfterParentCommits(t *testing.T) {
 	}
 }
 
+// When a batch contains counts for both committed and uncommitted parents, only the
+// message referencing the missing parent must be naked; messages whose IDs succeeded
+// must be acked so they do not exhaust retry attempts.
+func TestCounter_GranularNakOnlyAffectedMessages(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	committedID := uuid.Must(uuid.NewV7())
+	missingID := uuid.Must(uuid.NewV7())
+
+	mockFetcher := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+
+	mockRepo.EXPECT().
+		ApplyReplyCounts(gomock.Any(), gomock.Any()).
+		Return([]uuid.UUID{missingID}, nil)
+
+	msgSuccess := counterMsg(t, map[string]int{committedID.String(): 5})
+	msgMissing := counterMsg(t, map[string]int{missingID.String(): 2})
+
+	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msgSuccess, msgMissing), nil)
+
+	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	count, err := c.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessBatch failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 applied count, got %d", count)
+	}
+	if !msgSuccess.acked {
+		t.Error("expected msgSuccess to be acked")
+	}
+	if msgSuccess.naked {
+		t.Error("msgSuccess should not have been naked")
+	}
+	if !msgMissing.naked {
+		t.Error("expected msgMissing to be naked with delay")
+	}
+	if msgMissing.acked {
+		t.Error("msgMissing should not have been acked")
+	}
+}
+
 // A reply that commits before its parent must not hold up the whole batch. Retrying a
 // 2000-message batch because one parent is in another worker's open transaction cost a
 // full redelivery for a condition that resolves in milliseconds, and under load those

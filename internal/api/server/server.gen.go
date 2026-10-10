@@ -82,10 +82,35 @@ type Interaction struct {
 	Version int `json:"version"`
 }
 
+// InteractionCreatedEvent Event emitted and streamed via SSE when a post or reply is created.
+type InteractionCreatedEvent struct {
+	Author     string              `json:"author"`
+	Body       string              `json:"body"`
+	CreatedAt  time.Time           `json:"created_at"`
+	Depth      int                 `json:"depth"`
+	GroupId    string              `json:"group_id"`
+	Id         openapi_types.UUID  `json:"id"`
+	ParentId   *openapi_types.UUID `json:"parent_id,omitempty"`
+	ReplyCount int                 `json:"reply_count"`
+	RootId     *openapi_types.UUID `json:"root_id,omitempty"`
+	Title      *string             `json:"title,omitempty"`
+	Version    int                 `json:"version"`
+}
+
 // InteractionDetail defines model for InteractionDetail.
 type InteractionDetail struct {
 	Interaction Interaction   `json:"interaction"`
 	Replies     []Interaction `json:"replies"`
+}
+
+// InteractionEditedEvent Event emitted and streamed via SSE when an interaction is edited.
+type InteractionEditedEvent struct {
+	Body      string             `json:"body"`
+	GroupId   string             `json:"group_id"`
+	Id        openapi_types.UUID `json:"id"`
+	Title     *string            `json:"title,omitempty"`
+	UpdatedAt time.Time          `json:"updated_at"`
+	Version   int                `json:"version"`
 }
 
 // InteractionFeedResponse defines model for InteractionFeedResponse.
@@ -94,6 +119,12 @@ type InteractionFeedResponse struct {
 
 	// NextCursor Cursor to pass as cursor query param for subsequent page.
 	NextCursor *time.Time `json:"next_cursor,omitempty"`
+}
+
+// ReplyCountsRecalculatedEvent Event emitted after a batch commits and streamed via SSE, carrying absolute reply counts.
+type ReplyCountsRecalculatedEvent struct {
+	Counts  map[string]int `json:"counts"`
+	GroupId string         `json:"group_id"`
 }
 
 // UpdateInteractionRequest defines model for UpdateInteractionRequest.
@@ -432,6 +463,20 @@ type CreateInteractionRequestObject struct {
 
 type CreateInteractionResponseObject interface {
 	VisitCreateInteractionResponse(w http.ResponseWriter) error
+}
+
+type CreateInteraction200JSONResponse Interaction
+
+func (response CreateInteraction200JSONResponse) VisitCreateInteractionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type CreateInteraction201JSONResponse Interaction

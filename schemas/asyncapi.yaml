@@ -24,8 +24,10 @@ channels:
         $ref: "#/components/messages/InteractionCreatedEvent"
 
   interactionEdited:
-    address: "BOARD.{groupId}.evt.edited"
-    description: "Event emitted when an existing interaction is edited."
+    address: "BOARD.{groupId}.audit.edited"
+    description: >-
+      Event emitted when an existing interaction is edited. Sits in the "audit." namespace
+      outside "evt." so it is fanned out to SSE clients without matching the drainer filter.
     parameters:
       groupId:
         $ref: "#/components/parameters/groupId"

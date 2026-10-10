@@ -69,6 +69,12 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateInteractionRequest"
       responses:
+        "200":
+          description: Idempotent replay of an existing interaction.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Interaction"
         "201":
           description: Interaction created successfully.
           content:
@@ -214,7 +220,9 @@ paths:
   /v1/interactions/events:
     get:
       summary: Stream interactions
-      description: Server-Sent Events (SSE) endpoint broadcasting new interactions and edits in real-time.
+      description: >-
+        Server-Sent Events (SSE) endpoint broadcasting new interactions, edits, and
+        recalculated reply counts in real-time.
       operationId: EventsInteractions
       tags:
         - Interactions
@@ -227,11 +235,17 @@ paths:
             type: string
       responses:
         "200":
-          description: SSE text/event-stream of interaction events.
+          description: >-
+            SSE text/event-stream of serialized JSON events (data: <event>\n\n) or :ping heartbeats.
+            Events emitted correspond to InteractionCreatedEvent, InteractionEditedEvent, or
+            ReplyCountsRecalculatedEvent.
           content:
             text/event-stream:
               schema:
-                type: string
+                oneOf:
+                  - $ref: "#/components/schemas/InteractionCreatedEvent"
+                  - $ref: "#/components/schemas/InteractionEditedEvent"
+                  - $ref: "#/components/schemas/ReplyCountsRecalculatedEvent"
 
 components:
   schemas:
@@ -399,3 +413,96 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Interaction"
+
+    InteractionCreatedEvent:
+      type: object
+      description: Event emitted and streamed via SSE when a post or reply is created.
+      required:
+        - id
+        - group_id
+        - body
+        - author
+        - created_at
+        - reply_count
+        - depth
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          maxLength: 64
+        root_id:
+          type: string
+          format: uuid
+          nullable: true
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+        title:
+          type: string
+          nullable: true
+          maxLength: 255
+        body:
+          type: string
+          maxLength: 65535
+        author:
+          type: string
+          maxLength: 100
+        created_at:
+          type: string
+          format: date-time
+        reply_count:
+          type: integer
+        depth:
+          type: integer
+        version:
+          type: integer
+
+    InteractionEditedEvent:
+      type: object
+      description: Event emitted and streamed via SSE when an interaction is edited.
+      required:
+        - id
+        - group_id
+        - body
+        - version
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          maxLength: 64
+        title:
+          type: string
+          nullable: true
+          maxLength: 255
+        body:
+          type: string
+          maxLength: 65535
+        version:
+          type: integer
+          minimum: 2
+        updated_at:
+          type: string
+          format: date-time
+
+    ReplyCountsRecalculatedEvent:
+      type: object
+      description: Event emitted after a batch commits and streamed via SSE, carrying absolute reply counts.
+      required:
+        - group_id
+        - counts
+      properties:
+        group_id:
+          type: string
+          maxLength: 64
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
