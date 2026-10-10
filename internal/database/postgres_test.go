@@ -76,10 +76,11 @@ func mkInteraction(id uuid.UUID, parent, root *uuid.UUID) *database.Interaction 
 
 func strPtr(s string) *string { return &s }
 
-// reply_count means total descendants at every depth. A non-recursive count gets this
-// wrong: keying on root_id alone reports nothing for an intermediate reply, and layering
-// a parent_id tally on top double-counts the top level of a subtree.
-func TestCountDescendants_AllDescendants(t *testing.T) {
+// reply_count has two meanings by design: a thread root carries its whole conversation
+// size, an intermediate reply carries its direct reply count. A uniform "all descendants at
+// every depth" figure would need every ancestor recounted on every insert, and any
+// ancestor the drainer does not name would keep a stale number forever.
+func TestCountDescendants_RootAndIntermediateSemantics(t *testing.T) {
 	repo := liveRepo(t)
 	ctx := context.Background()
 
@@ -107,8 +108,10 @@ func TestCountDescendants_AllDescendants(t *testing.T) {
 		t.Fatalf("count descendants: %v", err)
 	}
 
-	// root has A, B, A1, A1a; A has A1, A1a; B has none.
-	for id, want := range map[uuid.UUID]int{root: 4, a: 2, b: 0} {
+	// A thread root counts every reply in the conversation; an intermediate reply counts
+	// only its direct replies. Those are exactly the nodes a new reply can change, so
+	// recounting only the immediate parent and the root keeps every count accurate.
+	for id, want := range map[uuid.UUID]int{root: 4, a: 1, b: 0} {
 		if got := counts[id]; got != want {
 			t.Errorf("descendants for %s: got %d, want %d", id, got, want)
 		}
@@ -130,12 +133,15 @@ func TestInsertBatchWithCounts_SeesOwnUncommittedRows(t *testing.T) {
 
 	replyA := uuid.Must(uuid.NewV7())
 	replyB := uuid.Must(uuid.NewV7())
-	counts, err := repo.InsertBatchWithCounts(ctx, []*database.Interaction{
+	counts, missing, err := repo.InsertBatchWithCounts(ctx, []*database.Interaction{
 		mkInteraction(replyA, &root, &root),
 		mkInteraction(replyB, &root, &root),
 	})
 	if err != nil {
 		t.Fatalf("insert batch with counts: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("expected every parent to be visible, got %d missing", len(missing))
 	}
 
 	if got := counts[root]; got != 2 {
@@ -156,11 +162,13 @@ func TestApplyReplyCounts_IsIdempotent(t *testing.T) {
 		t.Fatalf("insert root: %v", err)
 	}
 
-	if err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 5}); err != nil {
+	if missing, err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 5}); err != nil {
 		t.Fatalf("apply counts: %v", err)
+	} else if len(missing) != 0 {
+		t.Errorf("reported %d missing ids for an existing interaction", len(missing))
 	}
 	for range 3 {
-		if err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 5}); err != nil {
+		if _, err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 5}); err != nil {
 			t.Fatalf("re-apply counts: %v", err)
 		}
 	}
@@ -186,12 +194,16 @@ func TestApplyReplyCounts_Monotonic(t *testing.T) {
 		t.Fatalf("insert root: %v", err)
 	}
 
-	if err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 9}); err != nil {
+	if _, err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 9}); err != nil {
 		t.Fatalf("apply counts: %v", err)
 	}
 	// A stale, smaller total arriving late must be ignored.
-	if err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 3}); err != nil {
+	missing, err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{root: 3})
+	if err != nil {
 		t.Fatalf("apply stale counts: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Error("an existing interaction must never be reported as missing, or it would be retried forever")
 	}
 
 	got, err := repo.GetByID(ctx, root)
@@ -353,6 +365,62 @@ func TestUpdateWithIdempotency_UnknownInteraction(t *testing.T) {
 	_, _, err := repo.UpdateWithIdempotency(context.Background(), uuid.Must(uuid.NewV7()), 1, nil, "b", "k")
 	if !errors.Is(err, database.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// A parent whose row has not committed yet must be reported as missing so the caller
+// retries, and must not be reported once it exists, or it would retry forever.
+func TestApplyReplyCounts_ReportsMissingParent(t *testing.T) {
+	repo := liveRepo(t)
+	ctx := context.Background()
+
+	existing := uuid.Must(uuid.NewV7())
+	rootItem := mkInteraction(existing, nil, nil)
+	rootItem.Depth = 0
+	if err := repo.InsertBatch(ctx, []*database.Interaction{rootItem}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	missing := uuid.Must(uuid.NewV7())
+	pending, err := repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{existing: 3, missing: 7})
+	if err != nil {
+		t.Fatalf("apply counts: %v", err)
+	}
+
+	if len(pending) != 1 || pending[0] != missing {
+		t.Errorf("expected only the absent interaction to be reported missing, got %v", pending)
+	}
+
+	// The existing one must have been written despite the other being absent.
+	got, err := repo.GetByID(ctx, existing)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ReplyCount != 3 {
+		t.Errorf("expected the existing interaction to be updated to 3, got %d", got.ReplyCount)
+	}
+
+	// Once the parent commits, the redelivered event must land and stop being reported.
+	newRoot := mkInteraction(missing, nil, nil)
+	newRoot.Depth = 0
+	if err := repo.InsertBatch(ctx, []*database.Interaction{newRoot}); err != nil {
+		t.Fatalf("insert parent: %v", err)
+	}
+
+	pending, err = repo.ApplyReplyCounts(ctx, map[uuid.UUID]int{missing: 7})
+	if err != nil {
+		t.Fatalf("apply counts: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected no missing ids once the row exists, got %v", pending)
+	}
+
+	created, err := repo.GetByID(ctx, missing)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if created.ReplyCount != 7 {
+		t.Errorf("expected the redelivered count to land, got %d", created.ReplyCount)
 	}
 }
 

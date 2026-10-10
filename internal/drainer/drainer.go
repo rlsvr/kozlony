@@ -138,13 +138,28 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	counts, err := d.repo.InsertBatchWithCounts(ctx, interactions)
+	counts, missing, err := d.repo.InsertBatchWithCounts(ctx, interactions)
 	if err != nil {
 		log.Error().Err(err).Int("batch_size", len(interactions)).Msg("failed to insert batch into postgres, naking messages")
 		for _, m := range rawMsgs {
 			_ = m.Nak()
 		}
 		return 0, fmt.Errorf("insert batch: %w", err)
+	}
+
+	// A parent of this batch is still being written by another worker, so its reply count
+	// cannot be computed yet. Do not commit a partial count: redeliver the batch instead.
+	// The inserts are ON CONFLICT DO NOTHING, so the retry only recomputes the counts.
+	if len(missing) > 0 {
+		log.Warn().
+			Int("missing", len(missing)).
+			Int("batch_size", len(interactions)).
+			Msg("drainer: parent interaction not visible yet, redelivering batch")
+
+		for _, m := range rawMsgs {
+			_ = m.NakWithDelay(missingParentRetryDelay)
+		}
+		return 0, nil
 	}
 
 	// Only ack after the rows are durably committed. The reply count event is published

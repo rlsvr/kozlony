@@ -55,9 +55,9 @@ func TestCounter_RedeliveryIsIdempotent(t *testing.T) {
 
 	mockRepo.EXPECT().
 		ApplyReplyCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) error {
+		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error) {
 			applied = append(applied, counts)
-			return nil
+			return nil, nil
 		}).Times(2)
 
 	first := counterMsg(t, map[string]int{id.String(): 50})
@@ -98,9 +98,9 @@ func TestCounter_KeepsHighestCountWhenOutOfOrder(t *testing.T) {
 	var applied map[uuid.UUID]int
 	mockRepo.EXPECT().
 		ApplyReplyCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) error {
+		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error) {
 			applied = counts
-			return nil
+			return nil, nil
 		})
 
 	stale := counterMsg(t, map[string]int{id.String(): 10})
@@ -129,7 +129,7 @@ func TestCounter_ApplyFailureNaksMessages(t *testing.T) {
 
 	mockRepo.EXPECT().
 		ApplyReplyCounts(gomock.Any(), gomock.Any()).
-		Return(errors.New("db down"))
+		Return(nil, errors.New("db down"))
 
 	msg := counterMsg(t, map[string]int{id.String(): 5})
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
@@ -162,9 +162,9 @@ func TestCounter_SkipsInvalidPayloads(t *testing.T) {
 	var applied map[uuid.UUID]int
 	mockRepo.EXPECT().
 		ApplyReplyCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) error {
+		DoAndReturn(func(_ context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error) {
 			applied = counts
-			return nil
+			return nil, nil
 		})
 
 	garbage := newFakeMsg("BOARD.root.counter.replied", []byte("not json"))
@@ -218,10 +218,10 @@ func TestCounter_StopWaitsForWorkers(t *testing.T) {
 	var once sync.Once
 	mockRepo.EXPECT().
 		ApplyReplyCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ map[uuid.UUID]int) error {
+		DoAndReturn(func(_ context.Context, _ map[uuid.UUID]int) ([]uuid.UUID, error) {
 			once.Do(func() { close(started) })
 			<-release
-			return nil
+			return nil, nil
 		}).
 		AnyTimes()
 
@@ -293,7 +293,7 @@ func TestDrainer_PublishesCountsAfterAck(t *testing.T) {
 	// InsertBatchWithCounts returns the absolute count the drainer must forward.
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
-		Return(map[uuid.UUID]int{rootID: 1}, nil)
+		Return(map[uuid.UUID]int{rootID: 1}, nil, nil)
 
 	var published events.ReplyCountsRecalculatedEvent
 	mockPublisher.EXPECT().
@@ -350,7 +350,7 @@ func TestDrainer_PublishFailureDoesNotFailBatch(t *testing.T) {
 	mockConsumer.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		Return(map[uuid.UUID]int{rootID: 7}, nil)
+		Return(map[uuid.UUID]int{rootID: 7}, nil, nil)
 	mockPublisher.EXPECT().
 		PublishReplyCountsRecalculated(gomock.Any(), gomock.Any()).
 		Return(errors.New("nats unavailable"))
@@ -385,9 +385,9 @@ func TestDrainer_NeverInsertsEditNotifications(t *testing.T) {
 	// Any insert attempt is a hard failure, which surfaces the bug loudly.
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
 			t.Fatalf("drainer attempted to insert %d rows from an edit notification", len(items))
-			return nil, nil
+			return nil, nil, nil
 		}).
 		AnyTimes()
 
@@ -425,6 +425,68 @@ func TestDrainer_NeverInsertsEditNotifications(t *testing.T) {
 	}
 	if dlqReason == "" {
 		t.Error("expected the edit notification to be routed to the DLQ")
+	}
+}
+
+// The bug the stress test surfaced: a reply can be drained before the batch that creates
+// its parent commits, so the count for that parent has nowhere to land. The batch that
+// creates the parent emits counts for the parent's own parent, not for the parent itself,
+// so nothing else would ever retry it. Acking here loses the count permanently.
+func TestCounter_RedeliversWhenParentRowMissing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	parentID := uuid.Must(uuid.NewV7())
+
+	mockFetcher := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+
+	mockRepo.EXPECT().
+		ApplyReplyCounts(gomock.Any(), gomock.Any()).
+		Return([]uuid.UUID{parentID}, nil)
+
+	msg := counterMsg(t, map[string]int{parentID.String(): 1})
+	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
+
+	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	count, err := c.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessBatch failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 applied, got %d", count)
+	}
+	if !msg.naked {
+		t.Error("expected the message to be naked so the count is retried once the parent commits")
+	}
+	if msg.acked {
+		t.Error("acking would lose the count permanently")
+	}
+}
+
+// Once the parent exists the redelivered event must land and be acked.
+func TestCounter_AppliesAfterParentCommits(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	parentID := uuid.Must(uuid.NewV7())
+
+	mockFetcher := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+
+	mockRepo.EXPECT().
+		ApplyReplyCounts(gomock.Any(), gomock.Any()).
+		Return(nil, nil)
+
+	msg := counterMsg(t, map[string]int{parentID.String(): 1})
+	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
+
+	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	if _, err := c.ProcessBatch(context.Background()); err != nil {
+		t.Fatalf("ProcessBatch failed: %v", err)
+	}
+	if !msg.acked {
+		t.Error("expected the message to be acked once the parent row exists")
 	}
 }
 

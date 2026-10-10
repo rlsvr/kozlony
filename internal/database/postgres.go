@@ -102,16 +102,19 @@ type Repository interface {
 	Insert(ctx context.Context, item *Interaction) error
 	InsertBatch(ctx context.Context, items []*Interaction) error
 	// InsertBatchWithCounts inserts a batch and returns the recalculated reply
-	// count for every parent it touched. The count runs inside the insert
-	// transaction so it observes the batch's own uncommitted rows.
-	InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, error)
+	// count for every parent it touched, plus the ids whose rows are not
+	// visible yet. A non-empty missing list means the batch should be
+	// redelivered rather than committed, since a count cannot be anchored to
+	// a row that does not exist.
+	InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, []uuid.UUID, error)
 	// CountDescendants returns the total number of descendants for each supplied
 	// interaction id, counted over committed rows only.
 	CountDescendants(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error)
-	// ApplyReplyCounts writes absolute reply counts. Because it stores absolute
-	// totals rather than deltas, replaying the same batch is a no-op, and the
-	// monotonic guard stops an out-of-order event from walking the count backwards.
-	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) error
+	// ApplyReplyCounts writes absolute reply counts and returns the ids whose row
+	// does not exist yet, which the caller must redeliver once the row is committed.
+	// Storing absolute totals rather than deltas makes that redelivery idempotent, and
+	// the monotonic guard stops an out-of-order event from walking the count backwards.
+	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error)
 	Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*Interaction, error)
 	// UpdateWithIdempotency applies an update and records its outcome under a
 	// client-supplied key in the same transaction. A retry presenting a key that was
@@ -185,7 +188,7 @@ func (r *InteractionRepository) Insert(ctx context.Context, item *Interaction) e
 // writers against hot threads. Counts are instead recalculated and applied by a separate
 // consumer (see ApplyReplyCounts).
 func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Interaction) error {
-	_, err := r.InsertBatchWithCounts(ctx, items)
+	_, _, err := r.InsertBatchWithCounts(ctx, items)
 	return err
 }
 
@@ -198,32 +201,45 @@ func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Intera
 //
 // The returned counts are absolute totals, not deltas, which is what lets the counter
 // consumer be idempotent under JetStream's at-least-once delivery.
-func (r *InteractionRepository) InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, error) {
+func (r *InteractionRepository) InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
 	if len(items) == 0 {
-		return map[uuid.UUID]int{}, nil
+		return map[uuid.UUID]int{}, nil, nil
 	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("begin batch transaction: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
 
 	if err := insertBatchRows(ctx, tx, items); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	counts, err := countDescendants(ctx, tx, affectedParentIDs(items))
+	affected := affectedParentIDs(items)
+	counts, err := countDescendants(ctx, tx, affected)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	// A parent whose row is not visible yet cannot be counted. Redelivering the batch is
+	// safe: the inserts are ON CONFLICT DO NOTHING, so only the counts are recomputed.
+	var missing []uuid.UUID
+	for _, id := range affected {
+		if _, ok := counts[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, missing, nil
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("commit batch transaction: %w", err)
 	}
-	return counts, nil
+	return counts, nil, nil
 }
 
 // insertBatchRows pipelines the inserts for a batch onto the given transaction.
@@ -309,41 +325,48 @@ func (r *InteractionRepository) CountDescendants(ctx context.Context, ids []uuid
 	return countDescendants(ctx, r.pool, ids)
 }
 
-// countDescendants returns, for each supplied id, the number of replies in its subtree.
+// countDescendants returns the reply count for each supplied id.
 //
-// The count walks parent_id recursively so reply_count carries a single meaning (total
-// descendants) at every depth. A non-recursive shortcut is not equivalent: keying on
-// root_id only works for thread roots and reports nothing for an intermediate reply, and
-// adding a parent_id tally on top of it double-counts the top level of a subtree.
-//
-// UNION (not UNION ALL) deduplicates each level, which also makes the walk terminate on a
-// malformed cycle in the data instead of looping forever.
+// A thread root counts every reply in its conversation; an intermediate reply counts only
+// its direct replies. That split is not arbitrary: the drainer only ever recounts the
+// immediate parent and the thread root of each drained batch, so those are exactly the
+// nodes whose counts a new reply can change. Deriving a uniform "all descendants at every
+// depth" figure would require recounting every ancestor too, and any ancestor the drainer
+// does not name keeps a stale number forever.
 //
 // When q is a transaction, rows inserted by that same transaction are visible to the count.
+// An id whose row is absent returns a NULL total, which the caller treats as "not ready".
 func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[uuid.UUID]int, error) {
 	if len(ids) == 0 {
 		return map[uuid.UUID]int{}, nil
 	}
 
 	query := `
-		WITH RECURSIVE targets AS (
+		WITH targets AS (
 			SELECT unnest($1::uuid[]) AS id
 		),
-		tree AS (
-			SELECT c.id, t.id AS target
-			FROM targets t
-			JOIN interactions c ON c.parent_id = t.id
-		UNION
-			SELECT c.id, tr.target
-			FROM tree tr
-			JOIN interactions c ON c.parent_id = tr.id
+		thread_total AS (
+			SELECT root_id AS id, COUNT(*)::bigint AS n
+			FROM interactions
+			WHERE root_id = ANY($1)
+			GROUP BY root_id
 		),
-		totals AS (
-			SELECT target, COUNT(*) AS n FROM tree GROUP BY target
+		direct_replies AS (
+			SELECT parent_id AS id, COUNT(*)::bigint AS n
+			FROM interactions
+			WHERE parent_id = ANY($1)
+			GROUP BY parent_id
 		)
-		SELECT targets.id, COALESCE(totals.n, 0)
-		FROM targets
-		LEFT JOIN totals ON totals.target = targets.id;
+		SELECT t.id,
+		       CASE
+		           WHEN i.id IS NULL THEN NULL
+		           WHEN i.root_id IS NULL THEN COALESCE(tt.n, 0)
+		           ELSE COALESCE(dr.n, 0)
+		       END AS n
+		FROM targets t
+		LEFT JOIN interactions i ON i.id = t.id
+		LEFT JOIN thread_total tt ON tt.id = t.id
+		LEFT JOIN direct_replies dr ON dr.id = t.id;
 	`
 
 	rows, err := q.Query(ctx, query, ids)
@@ -356,12 +379,16 @@ func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[u
 	for rows.Next() {
 		var (
 			id    uuid.UUID
-			total int
+			total *int
 		)
 		if err := rows.Scan(&id, &total); err != nil {
 			return nil, fmt.Errorf("scan descendant count: %w", err)
 		}
-		counts[id] = total
+		if total == nil {
+			// The row is not visible yet; the caller retries once it commits.
+			continue
+		}
+		counts[id] = *total
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("descendant count rows: %w", err)
@@ -369,18 +396,25 @@ func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[u
 	return counts, nil
 }
 
-// ApplyReplyCounts writes absolute reply counts in a single statement.
+// ApplyReplyCounts writes absolute reply counts in a single statement and returns the ids
+// whose row does not exist yet.
 //
-// Storing absolute totals rather than a delta is what makes this safe under JetStream's
-// at-least-once delivery: replaying a batch recomputes the same number instead of
-// incrementing twice. The monotonic guard (reply_count < new) additionally prevents a
-// delayed, older event from moving an already-larger count backwards.
+// The missing ids matter: a reply's parent may be inserted by a different worker whose
+// batch commits later, so the parent row can be absent when this runs. The UPDATE would
+// then match nothing and the count would be lost for good, because the batch that creates
+// the parent emits counts for the parent's own parent, not for the parent itself. Reporting
+// those ids lets the caller redeliver the event once the row is committed.
+//
+// Storing absolute totals rather than a delta is what makes that redelivery safe: replaying
+// a batch recomputes the same number instead of incrementing twice. The monotonic guard
+// (reply_count < new) additionally prevents a delayed, older event from moving an
+// already-larger count backwards.
 //
 // Ids are sorted before binding so row locks are always acquired in a deterministic
 // order across concurrent counter workers, which is what prevents deadlocks.
-func (r *InteractionRepository) ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) error {
+func (r *InteractionRepository) ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error) {
 	if len(counts) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	sortedIDs := make([]uuid.UUID, 0, len(counts))
@@ -396,17 +430,43 @@ func (r *InteractionRepository) ApplyReplyCounts(ctx context.Context, counts map
 		totals[i] = int64(counts[id])
 	}
 
+	// The final SELECT reports targets that matched no row. An id whose row exists but is
+	// already at or above the incoming total is deliberately excluded: there is nothing to
+	// retry in that case, and retrying it would never clear.
 	query := `
-		UPDATE interactions AS i
-		SET reply_count = c.n
-		FROM unnest($1::uuid[], $2::bigint[]) AS c(id, n)
-		WHERE i.id = c.id AND i.reply_count < c.n;
+		WITH target AS (
+			SELECT unnest($1::uuid[]) AS id, unnest($2::bigint[]) AS n
+		),
+		updated AS (
+			UPDATE interactions AS i
+			SET reply_count = target.n
+			FROM target
+			WHERE i.id = target.id AND i.reply_count < target.n
+			RETURNING i.id
+		)
+		SELECT target.id
+		FROM target
+		WHERE NOT EXISTS (SELECT 1 FROM interactions i WHERE i.id = target.id);
 	`
 
-	if _, err := r.pool.Exec(ctx, query, sortedIDs, totals); err != nil {
-		return fmt.Errorf("apply reply counts: %w", err)
+	rows, err := r.pool.Query(ctx, query, sortedIDs, totals)
+	if err != nil {
+		return nil, fmt.Errorf("apply reply counts: %w", err)
 	}
-	return nil
+	defer rows.Close()
+
+	var missing []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan missing reply count id: %w", err)
+		}
+		missing = append(missing, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("missing reply count rows: %w", err)
+	}
+	return missing, nil
 }
 
 // Update updates an interaction body and title with optimistic concurrency version control.

@@ -184,11 +184,12 @@ func (m *MockRepository) EXPECT() *MockRepositoryMockRecorder {
 }
 
 // ApplyReplyCounts mocks base method.
-func (m *MockRepository) ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) error {
+func (m *MockRepository) ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ApplyReplyCounts", ctx, counts)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].([]uuid.UUID)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // ApplyReplyCounts indicates an expected call of ApplyReplyCounts.
@@ -271,12 +272,13 @@ func (mr *MockRepositoryMockRecorder) InsertBatch(ctx, items any) *gomock.Call {
 }
 
 // InsertBatchWithCounts mocks base method.
-func (m *MockRepository) InsertBatchWithCounts(ctx context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
+func (m *MockRepository) InsertBatchWithCounts(ctx context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "InsertBatchWithCounts", ctx, items)
 	ret0, _ := ret[0].(map[uuid.UUID]int)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].([]uuid.UUID)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // InsertBatchWithCounts indicates an expected call of InsertBatchWithCounts.

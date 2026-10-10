@@ -18,9 +18,15 @@ import (
 	"github.com/rlsvr/kozlony/internal/messaging/events"
 )
 
-// ReplyCountWriter persists absolute reply counts.
+// missingParentRetryDelay is how long to wait before retrying counts whose parent row has
+// not committed yet. It is comfortably longer than a drainer batch takes to commit, so the
+// parent is normally present on redelivery.
+const missingParentRetryDelay = 250 * time.Millisecond
+
+// ReplyCountWriter persists absolute reply counts. It returns the ids whose row does not
+// exist yet, which must be redelivered once the row is committed.
 type ReplyCountWriter interface {
-	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) error
+	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error)
 }
 
 // Counter applies recalculated reply counts produced by the drainer.
@@ -127,12 +133,30 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	if err := c.repo.ApplyReplyCounts(ctx, counts); err != nil {
+	missing, err := c.repo.ApplyReplyCounts(ctx, counts)
+	if err != nil {
 		log.Error().Err(err).Int("interactions", len(counts)).Msg("counter: failed to apply reply counts, naking messages")
 		for _, m := range rawMsgs {
 			_ = m.Nak()
 		}
 		return 0, fmt.Errorf("apply reply counts: %w", err)
+	}
+
+	// A reply can be drained before the batch that creates its parent commits, so the
+	// count for that parent has nowhere to land yet. NAK with a delay rather than acking,
+	// because the batch that creates the parent emits counts for its own parent, not for
+	// itself, so nothing else would ever retry this id. Re-applying counts that already
+	// landed is harmless: they are absolute totals and the store only moves forward.
+	if len(missing) > 0 {
+		log.Warn().
+			Int("missing", len(missing)).
+			Int("interactions", len(counts)).
+			Msg("counter: parent interaction not committed yet, redelivering after delay")
+
+		for _, m := range rawMsgs {
+			_ = m.NakWithDelay(missingParentRetryDelay)
+		}
+		return 0, nil
 	}
 
 	for _, m := range rawMsgs {

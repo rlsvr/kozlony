@@ -59,10 +59,15 @@ func (m *fakeMsg) Nak() error {
 	m.naked = true
 	return nil
 }
-func (*fakeMsg) NakWithDelay(_ time.Duration) error { return nil }
-func (*fakeMsg) InProgress() error                  { return nil }
-func (*fakeMsg) Term() error                        { return nil }
-func (*fakeMsg) TermWithReason(_ string) error      { return nil }
+func (m *fakeMsg) NakWithDelay(_ time.Duration) error {
+	m.ackMu.Lock()
+	defer m.ackMu.Unlock()
+	m.naked = true
+	return nil
+}
+func (*fakeMsg) InProgress() error             { return nil }
+func (*fakeMsg) Term() error                   { return nil }
+func (*fakeMsg) TermWithReason(_ string) error { return nil }
 
 type fakeMessageBatch struct {
 	ch  chan jetstream.Msg
@@ -108,14 +113,14 @@ func TestProcessBatch_Success(t *testing.T) {
 
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
-		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
 			if len(items) != 1 {
 				t.Fatalf("expected 1 item, got %d", len(items))
 			}
 			if items[0].ID.String() != id {
 				t.Errorf("expected ID %s, got %s", id, items[0].ID.String())
 			}
-			return map[uuid.UUID]int{}, nil
+			return map[uuid.UUID]int{}, nil, nil
 		})
 
 	count, err := d.ProcessBatch(context.Background())
@@ -164,7 +169,7 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		Return(nil, errors.New("db connection failure"))
+		Return(nil, nil, errors.New("db connection failure"))
 
 	count, err := d.ProcessBatch(context.Background())
 	if err == nil {

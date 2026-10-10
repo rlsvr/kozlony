@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"time"
+
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -44,6 +46,11 @@ func NewCounterConsumer(ctx context.Context, client *Client) (*CounterConsumer, 
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckWait:       client.cfg.NATSAckWait,
 		MaxAckPending: maxAckPending,
+		// Counts are redelivered while their parent row is still uncommitted. Cap the
+		// attempts so an event referencing an interaction that never arrives is parked
+		// instead of being retried forever, and back off between attempts.
+		MaxDeliver: 20,
+		BackOff:    []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, time.Second, 2 * time.Second},
 	}
 
 	cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)

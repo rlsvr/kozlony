@@ -1,16 +1,13 @@
 -- Migration 002: index for recalculating reply counts
 --
--- The drainer recalculates reply_count for every parent touched by a batch with a
--- recursive walk down parent_id:
+-- Recalculating reply_count for the parents a batch touches needs two tallies:
 --
---   WITH RECURSIVE tree AS (
---       SELECT c.id FROM targets t JOIN interactions c ON c.parent_id = t.id
---     UNION
---       SELECT c.id FROM tree tr JOIN interactions c ON c.parent_id = tr.id
---   ) ...
+--   SELECT root_id,   COUNT(*) ... WHERE root_id   = ANY($1)  -- thread roots
+--   SELECT parent_id, COUNT(*) ... WHERE parent_id = ANY($1)  -- intermediate replies
 --
--- parent_id is the only column that recursion touches, so this index is what keeps the
--- count an index scan per level instead of a sequential scan of the whole table.
+-- The first is served by the existing idx_interactions_thread on (root_id, created_at);
+-- this index serves the second, which the table otherwise has no index for at all and
+-- which would otherwise be a sequential scan of every batch.
 CREATE INDEX IF NOT EXISTS idx_interactions_parent_reply_counts
 ON interactions (parent_id)
 WHERE parent_id IS NOT NULL;
