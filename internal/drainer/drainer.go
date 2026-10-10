@@ -303,6 +303,19 @@ func eventToInteraction(evt *events.InteractionCreatedEvent) (*database.Interact
 		return nil, fmt.Errorf("parse interaction id: %w", err)
 	}
 
+	// Guard against decoding a non-creation event as an interaction. An
+	// InteractionEditedEvent shares id/group_id/body/title/version with the created
+	// schema, so json.Unmarshal succeeds and silently leaves author and created_at at
+	// their zero values, which would insert a row with an empty author and a year-1
+	// timestamp. The subject namespace keeps edits out of the drainer's filter, but this
+	// check makes the failure loud instead of corrupting data if that ever changes.
+	if evt.Author == "" {
+		return nil, errors.New("interaction event has empty author")
+	}
+	if evt.CreatedAt.IsZero() {
+		return nil, errors.New("interaction event has zero created_at")
+	}
+
 	var rootID *uuid.UUID
 	if evt.RootID != nil && *evt.RootID != "" {
 		if pRoot, err := uuid.Parse(*evt.RootID); err == nil {

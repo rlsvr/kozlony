@@ -329,6 +329,22 @@ func (mr *MockRepositoryMockRecorder) Update(ctx, id, expectedVersion, title, bo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockRepository)(nil).Update), ctx, id, expectedVersion, title, body)
 }
 
+// UpdateWithIdempotency mocks base method.
+func (m *MockRepository) UpdateWithIdempotency(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body, idempotencyKey string) (*database.Interaction, bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateWithIdempotency", ctx, id, expectedVersion, title, body, idempotencyKey)
+	ret0, _ := ret[0].(*database.Interaction)
+	ret1, _ := ret[1].(bool)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// UpdateWithIdempotency indicates an expected call of UpdateWithIdempotency.
+func (mr *MockRepositoryMockRecorder) UpdateWithIdempotency(ctx, id, expectedVersion, title, body, idempotencyKey any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateWithIdempotency", reflect.TypeOf((*MockRepository)(nil).UpdateWithIdempotency), ctx, id, expectedVersion, title, body, idempotencyKey)
+}
+
 // MockrowQuerier is a mock of rowQuerier interface.
 type MockrowQuerier struct {
 	ctrl     *gomock.Controller
@@ -371,4 +387,89 @@ func (mr *MockrowQuerierMockRecorder) Query(ctx, sql any, args ...any) *gomock.C
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]any{ctx, sql}, args...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Query", reflect.TypeOf((*MockrowQuerier)(nil).Query), varargs...)
+}
+
+// MockrowScanner is a mock of rowScanner interface.
+type MockrowScanner struct {
+	ctrl     *gomock.Controller
+	recorder *MockrowScannerMockRecorder
+	isgomock struct{}
+}
+
+// MockrowScannerMockRecorder is the mock recorder for MockrowScanner.
+type MockrowScannerMockRecorder struct {
+	mock *MockrowScanner
+}
+
+// NewMockrowScanner creates a new mock instance.
+func NewMockrowScanner(ctrl *gomock.Controller) *MockrowScanner {
+	mock := &MockrowScanner{ctrl: ctrl}
+	mock.recorder = &MockrowScannerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockrowScanner) EXPECT() *MockrowScannerMockRecorder {
+	return m.recorder
+}
+
+// Scan mocks base method.
+func (m *MockrowScanner) Scan(dest ...any) error {
+	m.ctrl.T.Helper()
+	varargs := []any{}
+	for _, a := range dest {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Scan", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Scan indicates an expected call of Scan.
+func (mr *MockrowScannerMockRecorder) Scan(dest ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Scan", reflect.TypeOf((*MockrowScanner)(nil).Scan), dest...)
+}
+
+// Mockexecer is a mock of execer interface.
+type Mockexecer struct {
+	ctrl     *gomock.Controller
+	recorder *MockexecerMockRecorder
+	isgomock struct{}
+}
+
+// MockexecerMockRecorder is the mock recorder for Mockexecer.
+type MockexecerMockRecorder struct {
+	mock *Mockexecer
+}
+
+// NewMockexecer creates a new mock instance.
+func NewMockexecer(ctrl *gomock.Controller) *Mockexecer {
+	mock := &Mockexecer{ctrl: ctrl}
+	mock.recorder = &MockexecerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *Mockexecer) EXPECT() *MockexecerMockRecorder {
+	return m.recorder
+}
+
+// QueryRow mocks base method.
+func (m *Mockexecer) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, sql}
+	for _, a := range args {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "QueryRow", varargs...)
+	ret0, _ := ret[0].(pgx.Row)
+	return ret0
+}
+
+// QueryRow indicates an expected call of QueryRow.
+func (mr *MockexecerMockRecorder) QueryRow(ctx, sql any, args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, sql}, args...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "QueryRow", reflect.TypeOf((*Mockexecer)(nil).QueryRow), varargs...)
 }

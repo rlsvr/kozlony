@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ const (
 type mockPublisher struct {
 	lastCreatedEvent *events.InteractionCreatedEvent
 	lastEditedEvent  *events.InteractionEditedEvent
+	editedPublishes  int
 }
 
 func (m *mockPublisher) PublishInteractionCreated(_ context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error) {
@@ -40,8 +42,13 @@ func (m *mockPublisher) PublishInteractionCreated(_ context.Context, evt *events
 
 func (m *mockPublisher) PublishInteractionEdited(_ context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error) {
 	m.lastEditedEvent = evt
+	m.editedPublishes++
 	return &jetstream.PubAck{}, nil
 }
+
+func (m *mockPublisher) editPublishCount() int { return m.editedPublishes }
+
+func newMockPublisher() *mockPublisher { return &mockPublisher{} }
 
 func (*mockPublisher) SubscribeEvents(_ context.Context, _ *string) (<-chan []byte, func(), error) {
 	ch := make(chan []byte, 10)
@@ -53,11 +60,16 @@ func (*mockPublisher) Ping(_ context.Context) error {
 }
 
 type mockRepository struct {
-	items map[uuid.UUID]*database.Interaction
+	items      map[uuid.UUID]*database.Interaction
+	updateKeys map[string]*database.Interaction
+	keysMu     sync.Mutex
 }
 
 func newMockRepository() *mockRepository {
-	return &mockRepository{items: make(map[uuid.UUID]*database.Interaction)}
+	return &mockRepository{
+		items:      make(map[uuid.UUID]*database.Interaction),
+		updateKeys: make(map[string]*database.Interaction),
+	}
 }
 
 func (*mockRepository) Ping(_ context.Context) error {
@@ -93,12 +105,36 @@ func (*mockRepository) ApplyReplyCounts(_ context.Context, _ map[uuid.UUID]int) 
 }
 
 func (m *mockRepository) Update(_ context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*database.Interaction, error) {
+	item, _, err := m.UpdateWithIdempotency(context.Background(), id, expectedVersion, title, body, "")
+	return item, err
+}
+
+// updateKeys mirrors interaction_update_keys: it records the outcome of an update so a
+// retry under the same key replays instead of failing the version check.
+func (m *mockRepository) UpdateWithIdempotency(
+	_ context.Context,
+	id uuid.UUID,
+	expectedVersion int,
+	title *string,
+	body string,
+	idempotencyKey string,
+) (*database.Interaction, bool, error) {
+	if idempotencyKey != "" {
+		m.keysMu.Lock()
+		key := idempotencyKey
+		recorded, ok := m.updateKeys[key]
+		m.keysMu.Unlock()
+		if ok {
+			return recorded, true, nil
+		}
+	}
+
 	item, ok := m.items[id]
 	if !ok {
-		return nil, database.ErrNotFound
+		return nil, false, database.ErrNotFound
 	}
 	if item.Version != expectedVersion {
-		return nil, database.ErrVersionConflict
+		return nil, false, database.ErrVersionConflict
 	}
 	// Mirrors the COALESCE($3, title) behaviour of the real repository: an omitted
 	// title leaves the stored title untouched.
@@ -109,7 +145,13 @@ func (m *mockRepository) Update(_ context.Context, id uuid.UUID, expectedVersion
 	item.Version++
 	now := time.Now().UTC()
 	item.UpdatedAt = &now
-	return item, nil
+
+	if idempotencyKey != "" {
+		m.keysMu.Lock()
+		m.updateKeys[idempotencyKey] = item
+		m.keysMu.Unlock()
+	}
+	return item, false, nil
 }
 
 func (m *mockRepository) GetByID(_ context.Context, id uuid.UUID) (*database.Interaction, error) {
@@ -378,7 +420,7 @@ func TestUpdateInteraction(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if err := h.UpdateInteraction(c, postID); err != nil {
+	if err := h.UpdateInteraction(c, postID, server.UpdateInteractionParams{}); err != nil {
 		t.Fatalf("unexpected error updating interaction: %v", err)
 	}
 	if rec.Code != http.StatusOK {
@@ -406,7 +448,7 @@ func TestUpdateInteraction(t *testing.T) {
 	recConflict := httptest.NewRecorder()
 	cConflict := e.NewContext(reqConflict, recConflict)
 
-	if err := h.UpdateInteraction(cConflict, postID); err != nil {
+	if err := h.UpdateInteraction(cConflict, postID, server.UpdateInteractionParams{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if recConflict.Code != http.StatusConflict {
@@ -420,7 +462,7 @@ func TestUpdateInteraction(t *testing.T) {
 	recNotFound := httptest.NewRecorder()
 	cNotFound := e.NewContext(reqNotFound, recNotFound)
 
-	if err := h.UpdateInteraction(cNotFound, nonExistentID); err != nil {
+	if err := h.UpdateInteraction(cNotFound, nonExistentID, server.UpdateInteractionParams{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if recNotFound.Code != http.StatusNotFound {
@@ -462,7 +504,7 @@ func TestUpdateInteraction_PreservesTitleWhenOmitted(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := e.NewContext(req, rec)
 
-			if err := h.UpdateInteraction(c, id); err != nil {
+			if err := h.UpdateInteraction(c, id, server.UpdateInteractionParams{}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if rec.Code != http.StatusOK {
@@ -532,6 +574,72 @@ func TestCreateInteraction_RootTitleRequired(t *testing.T) {
 	}
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400 Bad Request, got %d", rec.Code)
+	}
+}
+
+// A retried edit must return 200 with the original outcome, not a 409, and must not
+// publish the edit a second time (which would make every SSE client render it twice).
+func TestUpdateInteraction_IdempotencyKeyReplay(t *testing.T) {
+	e := echo.New()
+	repo := newMockRepository()
+	mockPub := newMockPublisher()
+	h := handler.New(mockPub, repo, nil)
+
+	postID := uuid.Must(uuid.NewV7())
+	title := "Initial Title"
+	_ = repo.Insert(context.Background(), &database.Interaction{
+		ID:        postID,
+		GroupID:   testGroupRoot,
+		Title:     &title,
+		Body:      "Initial Body",
+		Author:    testAuthorAlice,
+		CreatedAt: time.Now().UTC(),
+		Version:   1,
+	})
+
+	doUpdate := func(key string) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(server.UpdateInteractionRequest{
+			Body:    "Edited Body",
+			Version: 1, // stale on the retry, exactly as a real client would resend
+		})
+		req := httptest.NewRequestWithContext(
+			context.Background(), http.MethodPut, "/v1/interactions/"+postID.String(), bytes.NewReader(payload))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req.Header.Set("Idempotency-Key", key)
+		rec := httptest.NewRecorder()
+		if err := h.UpdateInteraction(e.NewContext(req, rec), postID, server.UpdateInteractionParams{
+			IdempotencyKey: &key,
+		}); err != nil {
+			t.Fatalf("unexpected handler error: %v", err)
+		}
+		return rec
+	}
+
+	first := doUpdate("retry-key-1")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first attempt: expected 200, got %d (%s)", first.Code, first.Body.String())
+	}
+
+	var firstBody server.Interaction
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	retry := doUpdate("retry-key-1")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry: expected 200 replaying the outcome, got %d (%s)", retry.Code, retry.Body.String())
+	}
+
+	var retryBody server.Interaction
+	if err := json.Unmarshal(retry.Body.Bytes(), &retryBody); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if retryBody.Version != firstBody.Version {
+		t.Errorf("replay returned version %d, original was %d", retryBody.Version, firstBody.Version)
+	}
+
+	if got := mockPub.editPublishCount(); got != 1 {
+		t.Errorf("edit published %d times, expected exactly 1 (a replay must not re-announce)", got)
 	}
 }
 

@@ -132,6 +132,12 @@ type EventsInteractionsParams struct {
 	GroupId *string `form:"group_id,omitempty" json:"group_id,omitempty"`
 }
 
+// UpdateInteractionParams defines parameters for UpdateInteraction.
+type UpdateInteractionParams struct {
+	// IdempotencyKey Optional client-provided key scoping this edit to one attempt. A retry that reuses the same key returns the outcome of the first successful update instead of a 409, which otherwise cannot be distinguished from a genuine concurrent edit.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // CreateInteractionJSONRequestBody defines body for CreateInteraction for application/json ContentType.
 type CreateInteractionJSONRequestBody = CreateInteractionRequest
 
@@ -157,7 +163,7 @@ type ServerInterface interface {
 	GetInteraction(ctx echo.Context, id openapi_types.UUID) error
 	// UpdateInteraction Edit an interaction
 	// (PUT /v1/interactions/{id})
-	UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error
+	UpdateInteraction(ctx echo.Context, id openapi_types.UUID, params UpdateInteractionParams) error
 	// GetReadyz Readiness probe
 	// (GET /v1/readyz)
 	GetReadyz(ctx echo.Context) error
@@ -285,8 +291,28 @@ func (w *ServerInterfaceWrapper) UpdateInteraction(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter id: %s", err))
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params UpdateInteractionParams
+
+	headers := ctx.Request().Header
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Expected one value for Idempotency-Key, got %d", n))
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter Idempotency-Key: %s", err))
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+	}
+
 	// Invoke the callback with all the unmarshaled arguments
-	err = w.Handler.UpdateInteraction(ctx, id)
+	err = w.Handler.UpdateInteraction(ctx, id, params)
 	return err
 }
 
@@ -538,8 +564,9 @@ func (response GetInteraction404JSONResponse) VisitGetInteractionResponse(w http
 }
 
 type UpdateInteractionRequestObject struct {
-	Id   openapi_types.UUID `json:"id"`
-	Body *UpdateInteractionJSONRequestBody
+	Id     openapi_types.UUID `json:"id"`
+	Params UpdateInteractionParams
+	Body   *UpdateInteractionJSONRequestBody
 }
 
 type UpdateInteractionResponseObject interface {
@@ -814,10 +841,11 @@ func (sh *strictHandler) GetInteraction(ctx echo.Context, id openapi_types.UUID)
 }
 
 // UpdateInteraction operation middleware
-func (sh *strictHandler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error {
+func (sh *strictHandler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID, params UpdateInteractionParams) error {
 	var request UpdateInteractionRequestObject
 
 	request.Id = id
+	request.Params = params
 
 	var body UpdateInteractionJSONRequestBody
 	var err error

@@ -26,7 +26,7 @@ func TestSubjectGenerators(t *testing.T) {
 		{
 			name:     "InteractionEdited with group",
 			got:      messaging.SubjectInteractionEdited("BOARD", "announcements"),
-			expected: "BOARD.announcements.evt.edited",
+			expected: "BOARD.announcements.audit.edited",
 		},
 		{
 			name:     "CreateInteractionCmd with group",
@@ -59,6 +59,16 @@ func TestSubjectGenerators(t *testing.T) {
 			expected: "BOARD.root.counter.replied",
 		},
 		{
+			name:     "SubjectAllAuditEvents",
+			got:      messaging.SubjectAllAuditEvents("BOARD"),
+			expected: "BOARD.*.audit.edited",
+		},
+		{
+			name:     "SubjectGroupAuditEvents",
+			got:      messaging.SubjectGroupAuditEvents("BOARD", "dev"),
+			expected: "BOARD.dev.audit.edited",
+		},
+		{
 			name:     "SubjectAllReplyCounts",
 			got:      messaging.SubjectAllReplyCounts("BOARD"),
 			expected: "BOARD.*.counter.replied",
@@ -76,6 +86,27 @@ func TestSubjectGenerators(t *testing.T) {
 				t.Errorf("got %q, expected %q", tt.got, tt.expected)
 			}
 		})
+	}
+}
+
+// An edit notification is not a write command: the handler already committed the edit
+// synchronously before publishing it. If the edit subject ever moved back inside "evt."
+// the drainer would consume it and try to insert an InteractionEditedEvent (which has no
+// author or created_at) as an interaction row.
+func TestEditSubjectIsOutsideDrainerFilter(t *testing.T) {
+	drainerFilter := messaging.SubjectAllEvents("BOARD")
+	editSubject := messaging.SubjectInteractionEdited("BOARD", "root")
+
+	if strings.Contains(editSubject, ".evt.") {
+		t.Fatalf("edit subject %q is matched by the drainer filter %q", editSubject, drainerFilter)
+	}
+	if !strings.Contains(editSubject, ".audit.") {
+		t.Errorf("edit subject %q should use the audit namespace, got %q", editSubject, editSubject)
+	}
+
+	// It must still be group-scoped so the stream filter captures it.
+	if !strings.HasPrefix(editSubject, "BOARD.root.") {
+		t.Errorf("edit subject %q is not group-scoped and would be dropped by the stream filter", editSubject)
 	}
 }
 

@@ -230,7 +230,11 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 }
 
 // UpdateInteraction handles editing an interaction's title and body with version verification.
-func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error {
+//
+// When the caller supplies an Idempotency-Key the outcome is recorded alongside the update,
+// so a retry that lost its response replays that outcome instead of receiving a 409 it
+// cannot distinguish from a genuine concurrent edit.
+func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID, params server.UpdateInteractionParams) error {
 	var req server.UpdateInteractionRequest
 	if err := ctx.Bind(&req); err != nil {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "invalid request payload"})
@@ -258,7 +262,12 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
 	}
 
-	updated, err := h.repo.Update(ctx.Request().Context(), id, req.Version, title, req.Body)
+	var idempotencyKey string
+	if params.IdempotencyKey != nil {
+		idempotencyKey = strings.TrimSpace(*params.IdempotencyKey)
+	}
+
+	updated, replayed, err := h.repo.UpdateWithIdempotency(ctx.Request().Context(), id, req.Version, title, req.Body, idempotencyKey)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			return ctx.JSON(http.StatusNotFound, server.ErrorResponse{Error: errInteractionNotFound})
@@ -268,6 +277,12 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		}
 		log.Error().Err(err).Str("id", id.String()).Msg("failed to update interaction")
 		return ctx.JSON(http.StatusInternalServerError, server.ErrorResponse{Error: "failed to update interaction"})
+	}
+
+	// A replay already announced this exact edit when it first succeeded. Publishing again
+	// would make every connected client see the same change twice.
+	if replayed {
+		return ctx.JSON(http.StatusOK, toAPIInteraction(updated))
 	}
 
 	if h.cache != nil {

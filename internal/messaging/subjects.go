@@ -13,8 +13,14 @@ const (
 	// EventCreatedSuffix is the subject suffix for created events.
 	EventCreatedSuffix = "evt.created"
 
-	// EventEditedSuffix is the subject suffix for edited events.
-	EventEditedSuffix = "evt.edited"
+	// EventEditedSuffix is the subject suffix for edit notifications.
+	//
+	// It sits deliberately outside the "evt." namespace because an edit is NOT a write
+	// command: the handler has already committed the edit to PostgreSQL synchronously
+	// before publishing this. The event exists only to fan the change out to SSE clients,
+	// so it must never match the drainer's filter (BOARD.<group>.evt.>), which would
+	// otherwise try to insert an edit notification as if it were an interaction.
+	EventEditedSuffix = "audit.edited"
 
 	// CommandCreateSuffix is the subject suffix for create commands.
 	CommandCreateSuffix = "cmd.create"
@@ -62,6 +68,21 @@ func SubjectAllCommands(stream string) string {
 // SubjectStreamFilter returns the stream-level wildcard capturing all events and commands.
 func SubjectStreamFilter(stream string) string {
 	return fmt.Sprintf("%s.>", stream)
+}
+
+// SubjectAllAuditEvents returns the wildcard subject matching every edit notification
+// across all groups in the stream.
+func SubjectAllAuditEvents(stream string) string {
+	return fmt.Sprintf("%s.*.%s", stream, EventEditedSuffix)
+}
+
+// SubjectGroupAuditEvents returns the wildcard subject matching edit notifications for one
+// group.
+func SubjectGroupAuditEvents(stream, groupID string) string {
+	if groupID == "" {
+		groupID = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s.%s", stream, groupID, EventEditedSuffix)
 }
 
 // SubjectReplyCountsRecalculated returns the subject for recalculated reply counts.

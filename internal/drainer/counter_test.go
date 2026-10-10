@@ -13,6 +13,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/rlsvr/kozlony/internal/config"
+	"github.com/rlsvr/kozlony/internal/database"
 	dbmocks "github.com/rlsvr/kozlony/internal/database/mocks"
 	"github.com/rlsvr/kozlony/internal/drainer"
 	drainermocks "github.com/rlsvr/kozlony/internal/drainer/mocks"
@@ -365,6 +366,65 @@ func TestDrainer_PublishFailureDoesNotFailBatch(t *testing.T) {
 	}
 	if !msg.acked {
 		t.Error("expected the message to stay acked since the rows are committed")
+	}
+}
+
+// The drainer must never insert an edit notification. An InteractionEditedEvent has no
+// author and no created_at, so decoding one as an InteractionCreatedEvent would produce a
+// row with author=” and a zero timestamp. The subject rename keeps it out of the drainer's
+// filter; this asserts the decode itself would also be rejected, so a filter mistake alone
+// cannot corrupt data.
+func TestDrainer_NeverInsertsEditNotifications(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+	mockDLQ := drainermocks.NewMockDLQPublisher(ctrl)
+
+	// Any insert attempt is a hard failure, which surfaces the bug loudly.
+	mockRepo.EXPECT().
+		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
+			t.Fatalf("drainer attempted to insert %d rows from an edit notification", len(items))
+			return nil, nil
+		}).
+		AnyTimes()
+
+	// It must be routed to the DLQ rather than silently dropped, so an operator can see
+	// that something published onto the drainer's subject.
+	var dlqReason string
+	mockDLQ.EXPECT().
+		PublishDLQ(gomock.Any(), "BOARD.root.audit.edited", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ []byte, reason string) error {
+			dlqReason = reason
+			return nil
+		})
+
+	// Even if an edit notification were routed here, it must be rejected as a payload
+	// rather than decoded into a half-empty interaction.
+	editPayload, _ := json.Marshal(events.InteractionEditedEvent{
+		Body:    "edited",
+		GroupID: testGroupID,
+		ID:      uuid.Must(uuid.NewV7()).String(),
+		Version: 2,
+	})
+	msg := newFakeMsg("BOARD.root.audit.edited", editPayload)
+
+	mockConsumer.EXPECT().
+		Fetch(gomock.Any(), gomock.Any()).
+		Return(batchOf(msg), nil)
+
+	d := drainer.New(mockConsumer, mockRepo, mockDLQ, &config.Config{DrainBatchSize: 10})
+	count, err := d.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessBatch should not error on a non-created message: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 interactions drained from an edit notification, got %d", count)
+	}
+	if dlqReason == "" {
+		t.Error("expected the edit notification to be routed to the DLQ")
 	}
 }
 

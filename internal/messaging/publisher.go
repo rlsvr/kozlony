@@ -125,25 +125,42 @@ func (p *Publisher) SubscribeEvents(_ context.Context, groupID *string) (<-chan 
 		return nil, nil, errors.New("nats client not connected")
 	}
 
-	subject := SubjectAllEvents(p.cfg.NATSStreamName)
+	// Two namespaces are fanned out to SSE clients: creations on the "evt." subjects and
+	// edit notifications on the "audit." subjects. Edits live outside "evt." precisely so
+	// the drainer cannot consume them, which means SSE has to listen on both explicitly.
+	createdSubject := SubjectAllEvents(p.cfg.NATSStreamName)
+	auditSubject := SubjectAllAuditEvents(p.cfg.NATSStreamName)
 	if groupID != nil && *groupID != "" {
-		subject = fmt.Sprintf("%s.%s.evt.>", p.cfg.NATSStreamName, *groupID)
+		createdSubject = fmt.Sprintf("%s.%s.evt.>", p.cfg.NATSStreamName, *groupID)
+		auditSubject = SubjectGroupAuditEvents(p.cfg.NATSStreamName, *groupID)
 	}
 
 	msgChan := make(chan []byte, 256)
-	sub, err := p.conn.Raw().Subscribe(subject, func(m *natsio.Msg) {
+	handler := func(m *natsio.Msg) {
 		select {
 		case msgChan <- append([]byte(nil), m.Data...):
 		default:
 			log.Warn().Str("subject", m.Subject).Msg("sse event buffer full, dropping message")
 		}
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("subscribe to nats subject %s: %w", subject, err)
+	}
+
+	raw := p.conn.Raw()
+	subs := make([]*natsio.Subscription, 0, 2)
+	for _, subject := range []string{createdSubject, auditSubject} {
+		sub, err := raw.Subscribe(subject, handler)
+		if err != nil {
+			for _, done := range subs {
+				_ = done.Unsubscribe()
+			}
+			return nil, nil, fmt.Errorf("subscribe to nats subject %s: %w", subject, err)
+		}
+		subs = append(subs, sub)
 	}
 
 	cleanup := func() {
-		_ = sub.Unsubscribe()
+		for _, sub := range subs {
+			_ = sub.Unsubscribe()
+		}
 	}
 	return msgChan, cleanup, nil
 }
