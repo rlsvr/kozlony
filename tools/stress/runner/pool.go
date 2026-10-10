@@ -28,7 +28,7 @@ type InteractionPool struct {
 	items   []InteractionRef
 	byID    map[uuid.UUID]int // maps ID to index in items
 	maxSize int
-	rnd     *rand.Rand
+	head    int
 }
 
 // NewInteractionPool initializes an empty interaction pool with a maximum capacity.
@@ -40,11 +40,10 @@ func NewInteractionPool(maxSize int) *InteractionPool {
 		items:   make([]InteractionRef, 0, maxSize),
 		byID:    make(map[uuid.UUID]int, maxSize),
 		maxSize: maxSize,
-		rnd:     rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 	}
 }
 
-// Add appends a new interaction to the pool, evicting the oldest if capacity is exceeded.
+// Add appends a new interaction to the pool, evicting the oldest in O(1) if capacity is exceeded.
 func (p *InteractionPool) Add(item InteractionRef) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -54,20 +53,21 @@ func (p *InteractionPool) Add(item InteractionRef) {
 		return
 	}
 
-	if len(p.items) >= p.maxSize {
-		// Evict oldest item
-		oldest := p.items[0]
-		delete(p.byID, oldest.ID)
-		p.items = p.items[1:]
-
-		// Re-index remaining items
-		for i, it := range p.items {
-			p.byID[it.ID] = i
-		}
+	if len(p.items) < p.maxSize {
+		p.byID[item.ID] = len(p.items)
+		p.items = append(p.items, item)
+		return
 	}
 
-	p.byID[item.ID] = len(p.items)
-	p.items = append(p.items, item)
+	// Ring buffer eviction in O(1) without re-indexing
+	evictIdx := p.head
+	p.head = (p.head + 1) % p.maxSize
+
+	oldest := p.items[evictIdx]
+	delete(p.byID, oldest.ID)
+
+	p.items[evictIdx] = item
+	p.byID[item.ID] = evictIdx
 }
 
 // UpdateVersion updates the version counter of an interaction in the pool.
@@ -80,27 +80,29 @@ func (p *InteractionPool) UpdateVersion(id uuid.UUID, newVersion int) {
 	}
 }
 
-// GetRandomParent returns a random interaction to attach a reply to.
+// GetRandomParent returns a random interaction to attach a reply to using an RLock.
 func (p *InteractionPool) GetRandomParent() (InteractionRef, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	if len(p.items) == 0 {
+	n := len(p.items)
+	if n == 0 {
 		return InteractionRef{}, false
 	}
-	idx := p.rnd.Intn(len(p.items))
+	idx := rand.Intn(n) //nolint:gosec
 	return p.items[idx], true
 }
 
-// GetRandomForEdit returns a random interaction for optimistic editing.
+// GetRandomForEdit returns a random interaction for optimistic editing using an RLock.
 func (p *InteractionPool) GetRandomForEdit() (InteractionRef, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	if len(p.items) == 0 {
+	n := len(p.items)
+	if n == 0 {
 		return InteractionRef{}, false
 	}
-	idx := p.rnd.Intn(len(p.items))
+	idx := rand.Intn(n) //nolint:gosec
 	return p.items[idx], true
 }
 

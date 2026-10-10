@@ -108,19 +108,8 @@ type Repository interface {
 	// CountDescendants returns the total number of descendants for each supplied
 	// interaction id, counted over committed rows only.
 	CountDescendants(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error)
-	// ApplyReplyCounts writes absolute reply counts and returns the ids whose row
-	// does not exist yet, which the caller must redeliver once the row is committed.
-	// Storing absolute totals rather than deltas makes that redelivery idempotent, and
-	// the monotonic guard stops an out-of-order event from walking the count backwards.
 	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error)
 	Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*Interaction, error)
-	// UpdateWithIdempotency applies an update and records its outcome under a
-	// client-supplied key in the same transaction. A retry presenting a key that was
-	// already applied replays the recorded outcome rather than failing the version
-	// check the client can no longer satisfy.
-	//
-	// A nil key skips recording and behaves exactly like Update.
-	UpdateWithIdempotency(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body, idempotencyKey string) (*Interaction, bool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*Interaction, error)
 	GetThread(ctx context.Context, rootID uuid.UUID) ([]*Interaction, error)
 	ListFeed(ctx context.Context, groupID string, limit int, before *time.Time) ([]*Interaction, error)
@@ -461,42 +450,6 @@ func (r *InteractionRepository) ApplyReplyCounts(ctx context.Context, counts map
 
 // Update updates an interaction body and title with optimistic concurrency version control.
 func (r *InteractionRepository) Update(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body string) (*Interaction, error) {
-	item, _, err := r.UpdateWithIdempotency(ctx, id, expectedVersion, title, body, "")
-	return item, err
-}
-
-// UpdateWithIdempotency applies an update and records its outcome under a client-supplied
-// key, so a retry can replay that outcome instead of failing the version check.
-//
-// The record is written in the same transaction as the update. That ordering is what makes
-// the replay safe: if the record committed, the update did too, so replaying it is honest.
-// The reverse order would let a retry see a key whose update had rolled back.
-//
-// Returns (item, replayed, error). replayed is true when the key was already applied and
-// the stored outcome is being returned without re-running the update.
-//
-// A nil or empty key skips recording entirely and behaves exactly like Update.
-func (r *InteractionRepository) UpdateWithIdempotency(
-	ctx context.Context,
-	id uuid.UUID,
-	expectedVersion int,
-	title *string,
-	body string,
-	idempotencyKey string,
-) (*Interaction, bool, error) {
-	// A retry arrives with the original expectedVersion, which no longer holds because the
-	// first attempt already incremented it. Check for a recorded outcome first so the
-	// client gets its original result rather than an unexplainable conflict.
-	if idempotencyKey != "" {
-		recorded, err := r.replayUpdate(ctx, id, idempotencyKey)
-		if err != nil {
-			return nil, false, err
-		}
-		if recorded != nil {
-			return recorded, true, nil
-		}
-	}
-
 	// COALESCE preserves the existing title when the client omits it, so a
 	// body-only edit can never silently wipe a root post's title.
 	updateQuery := `
@@ -506,92 +459,7 @@ func (r *InteractionRepository) UpdateWithIdempotency(
 		RETURNING id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version;
 	`
 
-	if idempotencyKey == "" {
-		item, err := r.runUpdate(ctx, updateQuery, id, expectedVersion, title, body)
-		if err != nil {
-			return nil, false, err
-		}
-		return item, false, nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("begin update transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	item, err := r.runUpdate(ctx, updateQuery, id, expectedVersion, title, body, tx)
-	if err != nil {
-		// A concurrent retry on the same key may have won between the check above and this
-		// UPDATE. Look for its recorded outcome before reporting a conflict, so a retried
-		// edit still replays rather than failing with an unexplainable 409.
-		replayed, replayErr := r.replayAfterConflict(ctx, tx, id, idempotencyKey, err)
-		if replayErr != nil {
-			return nil, false, replayErr
-		}
-		if replayed != nil {
-			if err := tx.Commit(ctx); err != nil {
-				return nil, false, fmt.Errorf("commit update transaction: %w", err)
-			}
-			return replayed, true, nil
-		}
-		return nil, false, err
-	}
-
-	recordQuery := `
-		INSERT INTO interaction_update_keys (interaction_id, idempotency_key, version, title, body)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (interaction_id, idempotency_key) DO NOTHING;
-	`
-	if _, err := tx.Exec(ctx, recordQuery, id, idempotencyKey, item.Version, item.Title, item.Body); err != nil {
-		return nil, false, fmt.Errorf("record update idempotency key: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("commit update transaction: %w", err)
-	}
-	return item, false, nil
-}
-
-// replayUpdate returns the recorded outcome for a previously applied key, or nil if the key
-// has not been seen.
-func (r *InteractionRepository) replayUpdate(ctx context.Context, id uuid.UUID, idempotencyKey string) (*Interaction, error) {
-	return replayUpdateWith(ctx, r.pool, id, idempotencyKey)
-}
-
-// replayAfterConflict returns the recorded outcome for updateErr's key when updateErr is a
-// version conflict and another writer already applied that key, or nil when the conflict is
-// genuine. It reads inside the transaction so it sees a racing winner's commit.
-func (*InteractionRepository) replayAfterConflict(
-	ctx context.Context,
-	tx pgx.Tx,
-	id uuid.UUID,
-	idempotencyKey string,
-	updateErr error,
-) (*Interaction, error) {
-	if !errors.Is(updateErr, ErrVersionConflict) {
-		return nil, nil
-	}
-	return replayUpdateWith(ctx, tx, id, idempotencyKey)
-}
-
-func replayUpdateWith(ctx context.Context, q execer, id uuid.UUID, idempotencyKey string) (*Interaction, error) {
-	query := `
-		SELECT i.id, i.group_id, i.root_id, i.parent_id, i.title, i.body, i.author,
-		       i.created_at, i.updated_at, i.reply_count, i.depth, i.version
-		FROM interaction_update_keys k
-		JOIN interactions i ON i.id = k.interaction_id
-		WHERE k.interaction_id = $1 AND k.idempotency_key = $2;
-	`
-
-	item, err := scanInteraction(q.QueryRow(ctx, query, id, idempotencyKey))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("replay update: %w", err)
-	}
-	return item, nil
+	return r.runUpdate(ctx, updateQuery, id, expectedVersion, title, body)
 }
 
 // rowScanner is satisfied by pgx.Row.

@@ -330,21 +330,7 @@ func (mr *MockRepositoryMockRecorder) Update(ctx, id, expectedVersion, title, bo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockRepository)(nil).Update), ctx, id, expectedVersion, title, body)
 }
 
-// UpdateWithIdempotency mocks base method.
-func (m *MockRepository) UpdateWithIdempotency(ctx context.Context, id uuid.UUID, expectedVersion int, title *string, body, idempotencyKey string) (*database.Interaction, bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateWithIdempotency", ctx, id, expectedVersion, title, body, idempotencyKey)
-	ret0, _ := ret[0].(*database.Interaction)
-	ret1, _ := ret[1].(bool)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
 
-// UpdateWithIdempotency indicates an expected call of UpdateWithIdempotency.
-func (mr *MockRepositoryMockRecorder) UpdateWithIdempotency(ctx, id, expectedVersion, title, body, idempotencyKey any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateWithIdempotency", reflect.TypeOf((*MockRepository)(nil).UpdateWithIdempotency), ctx, id, expectedVersion, title, body, idempotencyKey)
-}
 
 // MockrowQuerier is a mock of rowQuerier interface.
 type MockrowQuerier struct {

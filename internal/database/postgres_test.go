@@ -51,7 +51,7 @@ func liveRepo(t *testing.T) *database.InteractionRepository {
 	t.Cleanup(pool.Close)
 
 	repo := database.NewInteractionRepository(pool)
-	if _, err := pool.Exec(ctx, "TRUNCATE interactions, interaction_update_keys;"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE interactions;"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return repo
@@ -241,10 +241,7 @@ func TestInsertBatch_DoesNotWriteReplyCount(t *testing.T) {
 	}
 }
 
-// The bug this fixes: a client retries an edit after losing the response. Its own edit
-// already succeeded, so the version has moved on and it gets a 409 it cannot tell apart
-// from a real concurrent edit.
-func TestUpdateWithIdempotency_RetryReplaysOutcome(t *testing.T) {
+func TestUpdate_SuccessAndConflict(t *testing.T) {
 	repo := liveRepo(t)
 	ctx := context.Background()
 
@@ -256,110 +253,37 @@ func TestUpdateWithIdempotency_RetryReplaysOutcome(t *testing.T) {
 	}
 
 	body := "edited once"
-	item, replayed, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, body, "key-1")
+	item, err := repo.Update(ctx, id, 1, nil, body)
 	if err != nil {
 		t.Fatalf("first update: %v", err)
-	}
-	if replayed {
-		t.Error("the first application of a key must not report a replay")
 	}
 	if item.Version != 2 {
 		t.Errorf("expected version 2 after first update, got %d", item.Version)
 	}
-
-	// Same key, same stale expectedVersion: this is the retry.
-	again, replayed, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, body, "key-1")
-	if err != nil {
-		t.Fatalf("retry should replay, got error: %v", err)
-	}
-	if !replayed {
-		t.Error("expected the retry to be recognised as a replay")
-	}
-	if again.Version != item.Version {
-		t.Errorf("replay returned version %d, original was %d", again.Version, item.Version)
-	}
-	if again.Body != body {
-		t.Errorf("replay returned body %q, original was %q", again.Body, body)
-	}
-}
-
-// A replay must not increment the version again, or every retry would churn the row.
-func TestUpdateWithIdempotency_ReplayDoesNotBumpVersion(t *testing.T) {
-	repo := liveRepo(t)
-	ctx := context.Background()
-
-	id := uuid.Must(uuid.NewV7())
-	rootItem := mkInteraction(id, nil, nil)
-	rootItem.Depth = 0
-	if err := repo.InsertBatch(ctx, []*database.Interaction{rootItem}); err != nil {
-		t.Fatalf("insert: %v", err)
+	if item.Body != body {
+		t.Errorf("expected body %q, got %q", body, item.Body)
 	}
 
-	if _, _, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "first", "k"); err != nil {
-		t.Fatalf("first update: %v", err)
-	}
-	for range 5 {
-		if _, _, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "first", "k"); err != nil {
-			t.Fatalf("retry: %v", err)
-		}
-	}
-
-	got, err := repo.GetByID(ctx, id)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Version != 2 {
-		t.Errorf("version drifted to %d after repeated retries, want 2", got.Version)
-	}
-}
-
-// A different key is a genuinely new edit attempt and must still hit the version check.
-func TestUpdateWithIdempotency_DistinctKeysStillConflict(t *testing.T) {
-	repo := liveRepo(t)
-	ctx := context.Background()
-
-	id := uuid.Must(uuid.NewV7())
-	rootItem := mkInteraction(id, nil, nil)
-	rootItem.Depth = 0
-	if err := repo.InsertBatch(ctx, []*database.Interaction{rootItem}); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	if _, _, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "first", "key-a"); err != nil {
-		t.Fatalf("first update: %v", err)
-	}
-
-	// Same stale version, different key: a real concurrent edit, so 409 is correct.
-	_, replayed, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "second", "key-b")
+	// Attempting to update with stale version 1 must return ErrVersionConflict
+	_, err = repo.Update(ctx, id, 1, nil, "edited twice")
 	if !errors.Is(err, database.ErrVersionConflict) {
-		t.Fatalf("expected ErrVersionConflict for a distinct key, got %v (replayed=%v)", err, replayed)
+		t.Fatalf("expected ErrVersionConflict on stale version, got %v", err)
+	}
+
+	// Updating with correct version 2 succeeds and bumps version to 3
+	item2, err := repo.Update(ctx, id, 2, nil, "edited twice")
+	if err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+	if item2.Version != 3 {
+		t.Errorf("expected version 3 after second update, got %d", item2.Version)
 	}
 }
 
-// Without a key the behaviour must be identical to Update, including the conflict.
-func TestUpdateWithIdempotency_NoKeyBehavesLikeUpdate(t *testing.T) {
-	repo := liveRepo(t)
-	ctx := context.Background()
-
-	id := uuid.Must(uuid.NewV7())
-	rootItem := mkInteraction(id, nil, nil)
-	rootItem.Depth = 0
-	if err := repo.InsertBatch(ctx, []*database.Interaction{rootItem}); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	if _, _, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "a", ""); err != nil {
-		t.Fatalf("keyless update: %v", err)
-	}
-	if _, _, err := repo.UpdateWithIdempotency(ctx, id, 1, nil, "b", ""); !errors.Is(err, database.ErrVersionConflict) {
-		t.Fatalf("expected a conflict without an idempotency key, got %v", err)
-	}
-}
-
-func TestUpdateWithIdempotency_UnknownInteraction(t *testing.T) {
+func TestUpdate_UnknownInteraction(t *testing.T) {
 	repo := liveRepo(t)
 
-	_, _, err := repo.UpdateWithIdempotency(context.Background(), uuid.Must(uuid.NewV7()), 1, nil, "b", "k")
+	_, err := repo.Update(context.Background(), uuid.Must(uuid.NewV7()), 1, nil, "b")
 	if !errors.Is(err, database.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}

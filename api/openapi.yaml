@@ -175,16 +175,6 @@ paths:
           schema:
             type: string
             format: uuid
-        - name: Idempotency-Key
-          in: header
-          description: >-
-            Optional client-provided key scoping this edit to one attempt. A retry that
-            reuses the same key returns the outcome of the first successful update instead of
-            a 409, which otherwise cannot be distinguished from a genuine concurrent edit.
-          required: false
-          schema:
-            type: string
-            minLength: 1
       requestBody:
         required: true
         content:

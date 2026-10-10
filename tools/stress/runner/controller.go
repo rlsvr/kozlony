@@ -466,6 +466,7 @@ func (c *PressureController) sendPostInteraction(ctx context.Context, action str
 			})
 		}
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author string) {
@@ -509,6 +510,7 @@ func (c *PressureController) doEdit(ctx context.Context, rng *rand.Rand, author 
 	if resp.StatusCode == http.StatusOK {
 		c.pool.UpdateVersion(item.ID, item.Version+1)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
@@ -543,6 +545,7 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 	defer func() { _ = resp.Body.Close() }()
 
 	c.metrics.Record(action, resp.StatusCode, lat, nil)
+	_, _ = io.Copy(io.Discard, resp.Body)
 }
 
 func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
