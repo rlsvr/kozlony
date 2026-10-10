@@ -88,8 +88,8 @@ func (m *mockRepository) InsertBatch(_ context.Context, items []*database.Intera
 	return nil
 }
 
-func (*mockRepository) InsertBatchWithCounts(_ context.Context, _ []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
-	return map[uuid.UUID]int{}, nil, nil
+func (*mockRepository) InsertBatchWithCounts(_ context.Context, _ []*database.Interaction) (map[uuid.UUID]int, error) {
+	return map[uuid.UUID]int{}, nil
 }
 
 func (*mockRepository) CountDescendants(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error) {

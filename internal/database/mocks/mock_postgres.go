@@ -272,13 +272,12 @@ func (mr *MockRepositoryMockRecorder) InsertBatch(ctx, items any) *gomock.Call {
 }
 
 // InsertBatchWithCounts mocks base method.
-func (m *MockRepository) InsertBatchWithCounts(ctx context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
+func (m *MockRepository) InsertBatchWithCounts(ctx context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "InsertBatchWithCounts", ctx, items)
 	ret0, _ := ret[0].(map[uuid.UUID]int)
-	ret1, _ := ret[1].([]uuid.UUID)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // InsertBatchWithCounts indicates an expected call of InsertBatchWithCounts.

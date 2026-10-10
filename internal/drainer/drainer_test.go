@@ -113,14 +113,14 @@ func TestProcessBatch_Success(t *testing.T) {
 
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
-		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
 			if len(items) != 1 {
 				t.Fatalf("expected 1 item, got %d", len(items))
 			}
 			if items[0].ID.String() != id {
 				t.Errorf("expected ID %s, got %s", id, items[0].ID.String())
 			}
-			return map[uuid.UUID]int{}, nil, nil
+			return map[uuid.UUID]int{}, nil
 		})
 
 	count, err := d.ProcessBatch(context.Background())
@@ -169,7 +169,7 @@ func TestProcessBatch_InsertError_NaksMessages(t *testing.T) {
 
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		Return(nil, nil, errors.New("db connection failure"))
+		Return(nil, errors.New("db connection failure"))
 
 	count, err := d.ProcessBatch(context.Background())
 	if err == nil {

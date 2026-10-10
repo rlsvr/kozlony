@@ -133,15 +133,12 @@ func TestInsertBatchWithCounts_SeesOwnUncommittedRows(t *testing.T) {
 
 	replyA := uuid.Must(uuid.NewV7())
 	replyB := uuid.Must(uuid.NewV7())
-	counts, missing, err := repo.InsertBatchWithCounts(ctx, []*database.Interaction{
+	counts, err := repo.InsertBatchWithCounts(ctx, []*database.Interaction{
 		mkInteraction(replyA, &root, &root),
 		mkInteraction(replyB, &root, &root),
 	})
 	if err != nil {
 		t.Fatalf("insert batch with counts: %v", err)
-	}
-	if len(missing) != 0 {
-		t.Fatalf("expected every parent to be visible, got %d missing", len(missing))
 	}
 
 	if got := counts[root]; got != 2 {

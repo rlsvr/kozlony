@@ -293,7 +293,7 @@ func TestDrainer_PublishesCountsAfterAck(t *testing.T) {
 	// InsertBatchWithCounts returns the absolute count the drainer must forward.
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
-		Return(map[uuid.UUID]int{rootID: 1}, nil, nil)
+		Return(map[uuid.UUID]int{rootID: 1}, nil)
 
 	var published events.ReplyCountsRecalculatedEvent
 	mockPublisher.EXPECT().
@@ -350,7 +350,7 @@ func TestDrainer_PublishFailureDoesNotFailBatch(t *testing.T) {
 	mockConsumer.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		Return(map[uuid.UUID]int{rootID: 7}, nil, nil)
+		Return(map[uuid.UUID]int{rootID: 7}, nil)
 	mockPublisher.EXPECT().
 		PublishReplyCountsRecalculated(gomock.Any(), gomock.Any()).
 		Return(errors.New("nats unavailable"))
@@ -385,9 +385,9 @@ func TestDrainer_NeverInsertsEditNotifications(t *testing.T) {
 	// Any insert attempt is a hard failure, which surfaces the bug loudly.
 	mockRepo.EXPECT().
 		InsertBatchWithCounts(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
+		DoAndReturn(func(_ context.Context, items []*database.Interaction) (map[uuid.UUID]int, error) {
 			t.Fatalf("drainer attempted to insert %d rows from an edit notification", len(items))
-			return nil, nil, nil
+			return nil, nil
 		}).
 		AnyTimes()
 
@@ -487,6 +487,72 @@ func TestCounter_AppliesAfterParentCommits(t *testing.T) {
 	}
 	if !msg.acked {
 		t.Error("expected the message to be acked once the parent row exists")
+	}
+}
+
+// A reply that commits before its parent must not hold up the whole batch. Retrying a
+// 2000-message batch because one parent is in another worker's open transaction cost a
+// full redelivery for a condition that resolves in milliseconds, and under load those
+// retries compounded until the backlog never drained. The parent's own batch counts it.
+func TestDrainer_CommitsWhenParentNotVisible(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	rootID := uuid.Must(uuid.NewV7())
+	replyID := uuid.Must(uuid.NewV7())
+
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+	mockPublisher := drainermocks.NewMockReplyCountPublisher(ctrl)
+
+	evt := events.InteractionCreatedEvent{
+		Author:    testAuthor,
+		Body:      "a reply whose parent is still in flight",
+		CreatedAt: time.Now().UTC(),
+		GroupID:   testGroupID,
+		ID:        replyID.String(),
+		ParentID:  ptrTo(rootID.String()),
+		RootID:    ptrTo(rootID.String()),
+		Version:   1,
+	}
+	data, _ := json.Marshal(evt)
+	msg := newFakeMsg("BOARD.root.evt.created", data)
+
+	mockConsumer.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
+
+	// The parent is invisible, so it is absent from the counts; only the reply itself is
+	// returned, because every inserted node is counted by its own batch.
+	mockRepo.EXPECT().
+		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
+		Return(map[uuid.UUID]int{replyID: 0}, nil)
+
+	var published events.ReplyCountsRecalculatedEvent
+	mockPublisher.EXPECT().
+		PublishReplyCountsRecalculated(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, e *events.ReplyCountsRecalculatedEvent) error {
+			published = *e
+			return nil
+		})
+
+	d := drainer.NewWithCountPublisher(mockConsumer, mockRepo, nil, mockPublisher, &config.Config{DrainBatchSize: 10})
+	count, err := d.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessBatch failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected the batch to be drained, got %d", count)
+	}
+	if !msg.acked {
+		t.Error("expected the batch to commit and ack rather than be redelivered")
+	}
+	if msg.naked {
+		t.Error("nak-ing here reintroduces the retry storm this path exists to avoid")
+	}
+	if _, present := published.Counts[rootID.String()]; present {
+		t.Error("expected the invisible parent to be omitted; its own batch counts it")
+	}
+	if _, present := published.Counts[replyID.String()]; !present {
+		t.Error("expected the inserted node to be counted by its own batch")
 	}
 }
 

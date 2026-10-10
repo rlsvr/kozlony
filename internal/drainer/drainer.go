@@ -138,28 +138,13 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	counts, missing, err := d.repo.InsertBatchWithCounts(ctx, interactions)
+	counts, err := d.repo.InsertBatchWithCounts(ctx, interactions)
 	if err != nil {
 		log.Error().Err(err).Int("batch_size", len(interactions)).Msg("failed to insert batch into postgres, naking messages")
 		for _, m := range rawMsgs {
 			_ = m.Nak()
 		}
 		return 0, fmt.Errorf("insert batch: %w", err)
-	}
-
-	// A parent of this batch is still being written by another worker, so its reply count
-	// cannot be computed yet. Do not commit a partial count: redeliver the batch instead.
-	// The inserts are ON CONFLICT DO NOTHING, so the retry only recomputes the counts.
-	if len(missing) > 0 {
-		log.Warn().
-			Int("missing", len(missing)).
-			Int("batch_size", len(interactions)).
-			Msg("drainer: parent interaction not visible yet, redelivering batch")
-
-		for _, m := range rawMsgs {
-			_ = m.NakWithDelay(missingParentRetryDelay)
-		}
-		return 0, nil
 	}
 
 	// Only ack after the rows are durably committed. The reply count event is published
@@ -187,23 +172,24 @@ func (d *Drainer) publishReplyCounts(ctx context.Context, items []*database.Inte
 		return
 	}
 
-	// A parent always belongs to the same group as the replies hanging off it, so each
-	// count is attributed to the group of the reply that pulled it in. Counts whose id
-	// is not referenced by any item in the batch are skipped rather than guessed.
+	// A parent always belongs to the same group as the replies hanging off it, so each count
+	// is attributed to the group of the item that referenced it. The set here mirrors
+	// affectedCountIDs: the node itself plus its parent and thread root. Counts whose id is
+	// not referenced by any item in the batch are skipped rather than guessed.
 	groupOfParent := make(map[uuid.UUID]string, len(counts))
 	for _, item := range items {
 		group := item.GroupID
 		if group == "" {
 			group = messaging.DefaultGroupID
 		}
-		for _, parentID := range []*uuid.UUID{item.ParentID, item.RootID} {
-			if parentID == nil {
+		for _, id := range []*uuid.UUID{&item.ID, item.ParentID, item.RootID} {
+			if id == nil {
 				continue
 			}
-			if _, known := counts[*parentID]; !known {
+			if _, known := counts[*id]; !known {
 				continue
 			}
-			groupOfParent[*parentID] = group
+			groupOfParent[*id] = group
 		}
 	}
 

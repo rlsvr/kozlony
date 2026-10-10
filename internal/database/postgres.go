@@ -102,11 +102,9 @@ type Repository interface {
 	Insert(ctx context.Context, item *Interaction) error
 	InsertBatch(ctx context.Context, items []*Interaction) error
 	// InsertBatchWithCounts inserts a batch and returns the recalculated reply
-	// count for every parent it touched, plus the ids whose rows are not
-	// visible yet. A non-empty missing list means the batch should be
-	// redelivered rather than committed, since a count cannot be anchored to
-	// a row that does not exist.
-	InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, []uuid.UUID, error)
+	// count for every node the batch touched. Nodes referenced by the batch
+	// but not yet visible are omitted: their own batch will count them.
+	InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, error)
 	// CountDescendants returns the total number of descendants for each supplied
 	// interaction id, counted over committed rows only.
 	CountDescendants(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error)
@@ -188,58 +186,49 @@ func (r *InteractionRepository) Insert(ctx context.Context, item *Interaction) e
 // writers against hot threads. Counts are instead recalculated and applied by a separate
 // consumer (see ApplyReplyCounts).
 func (r *InteractionRepository) InsertBatch(ctx context.Context, items []*Interaction) error {
-	_, _, err := r.InsertBatchWithCounts(ctx, items)
+	_, err := r.InsertBatchWithCounts(ctx, items)
 	return err
 }
 
 // InsertBatchWithCounts inserts a batch and returns the recalculated reply count for every
-// parent the batch touched.
+// node the batch touched and could see.
 //
 // The count runs on the same connection as the insert, before COMMIT, so it observes the
 // batch's own uncommitted rows. That is what makes a batch self-counting: the drainer can
 // emit a correct absolute total without waiting for a second pass over the data.
 //
+// A node referenced by the batch but not yet visible (a parent another worker is still
+// committing) is simply absent from the result. Its own batch will count it, so the batch is
+// still committed rather than redelivered. See affectedCountIDs.
+//
 // The returned counts are absolute totals, not deltas, which is what lets the counter
 // consumer be idempotent under JetStream's at-least-once delivery.
-func (r *InteractionRepository) InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, []uuid.UUID, error) {
+func (r *InteractionRepository) InsertBatchWithCounts(ctx context.Context, items []*Interaction) (map[uuid.UUID]int, error) {
 	if len(items) == 0 {
-		return map[uuid.UUID]int{}, nil, nil
+		return map[uuid.UUID]int{}, nil
 	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin batch transaction: %w", err)
+		return nil, fmt.Errorf("begin batch transaction: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
 
 	if err := insertBatchRows(ctx, tx, items); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	affected := affectedParentIDs(items)
-	counts, err := countDescendants(ctx, tx, affected)
+	counts, err := countDescendants(ctx, tx, affectedCountIDs(items))
 	if err != nil {
-		return nil, nil, err
-	}
-
-	// A parent whose row is not visible yet cannot be counted. Redelivering the batch is
-	// safe: the inserts are ON CONFLICT DO NOTHING, so only the counts are recomputed.
-	var missing []uuid.UUID
-	for _, id := range affected {
-		if _, ok := counts[id]; !ok {
-			missing = append(missing, id)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, missing, nil
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, fmt.Errorf("commit batch transaction: %w", err)
+		return nil, fmt.Errorf("commit batch transaction: %w", err)
 	}
-	return counts, nil, nil
+	return counts, nil
 }
 
 // insertBatchRows pipelines the inserts for a batch onto the given transaction.
@@ -287,11 +276,21 @@ func insertBatchRows(ctx context.Context, tx pgx.Tx, items []*Interaction) error
 	return nil
 }
 
-// affectedParentIDs returns the distinct set of interactions whose reply count a batch can
-// change: every reply contributes to its immediate parent and to the thread root.
-func affectedParentIDs(items []*Interaction) []uuid.UUID {
-	seen := make(map[uuid.UUID]struct{}, len(items)*2)
-	ids := make([]uuid.UUID, 0, len(items)*2)
+// affectedCountIDs returns the distinct set of interactions whose reply count a batch must
+// refresh: every node the batch inserts, plus every reply's immediate parent and thread root.
+//
+// Including the inserted nodes themselves is what removes the need to wait on a parent that
+// another worker is still committing. A node is always visible in its own transaction, so
+// counting it here means its own batch always establishes a correct baseline. If a reply
+// commits before its parent, the reply's batch simply skips the parent it cannot see, and the
+// parent's batch counts it a moment later with the reply already committed.
+//
+// The alternative, retrying a batch until every referenced parent is visible, costs a
+// redelivery of the whole batch for a condition that resolves itself within milliseconds, and
+// under load those retries compound into a backlog that never drains.
+func affectedCountIDs(items []*Interaction) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(items)*3)
+	ids := make([]uuid.UUID, 0, len(items)*3)
 
 	add := func(id *uuid.UUID) {
 		if id == nil {
@@ -305,6 +304,7 @@ func affectedParentIDs(items []*Interaction) []uuid.UUID {
 	}
 
 	for _, item := range items {
+		add(&item.ID)
 		add(item.ParentID)
 		if item.RootID != nil && (item.ParentID == nil || *item.RootID != *item.ParentID) {
 			add(item.RootID)
@@ -328,14 +328,13 @@ func (r *InteractionRepository) CountDescendants(ctx context.Context, ids []uuid
 // countDescendants returns the reply count for each supplied id.
 //
 // A thread root counts every reply in its conversation; an intermediate reply counts only
-// its direct replies. That split is not arbitrary: the drainer only ever recounts the
-// immediate parent and the thread root of each drained batch, so those are exactly the
-// nodes whose counts a new reply can change. Deriving a uniform "all descendants at every
-// depth" figure would require recounting every ancestor too, and any ancestor the drainer
-// does not name keeps a stale number forever.
+// its direct replies. The two are told apart without reading the node's own row: root_id
+// always points at a real thread root, so a non-zero "rows with root_id = id" tally means
+// the node is a root, and an intermediate reply always has a zero root_id tally. That also
+// means an id whose row has not committed yet still gets a count, which lets the batch
+// publish it and the counter retry only once the row appears.
 //
 // When q is a transaction, rows inserted by that same transaction are visible to the count.
-// An id whose row is absent returns a NULL total, which the caller treats as "not ready".
 func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[uuid.UUID]int, error) {
 	if len(ids) == 0 {
 		return map[uuid.UUID]int{}, nil
@@ -358,13 +357,8 @@ func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[u
 			GROUP BY parent_id
 		)
 		SELECT t.id,
-		       CASE
-		           WHEN i.id IS NULL THEN NULL
-		           WHEN i.root_id IS NULL THEN COALESCE(tt.n, 0)
-		           ELSE COALESCE(dr.n, 0)
-		       END AS n
+		       CASE WHEN COALESCE(tt.n, 0) > 0 THEN tt.n ELSE COALESCE(dr.n, 0) END AS n
 		FROM targets t
-		LEFT JOIN interactions i ON i.id = t.id
 		LEFT JOIN thread_total tt ON tt.id = t.id
 		LEFT JOIN direct_replies dr ON dr.id = t.id;
 	`
@@ -379,16 +373,12 @@ func countDescendants(ctx context.Context, q rowQuerier, ids []uuid.UUID) (map[u
 	for rows.Next() {
 		var (
 			id    uuid.UUID
-			total *int
+			total int
 		)
 		if err := rows.Scan(&id, &total); err != nil {
 			return nil, fmt.Errorf("scan descendant count: %w", err)
 		}
-		if total == nil {
-			// The row is not visible yet; the caller retries once it commits.
-			continue
-		}
-		counts[id] = *total
+		counts[id] = total
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("descendant count rows: %w", err)
