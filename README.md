@@ -51,8 +51,8 @@ Kozlony is a high-throughput, low-latency message board and conversation service
    - The HTTP `201 Created` response returns immediately upon JetStream confirmation, decoupling user-facing write latency from relational database writes.
 
 2. **Hot Read Shield (In-Memory Cache)**:
-   - Powered by `eko/gocache` with an in-memory `go-cache` store, holding the most active interactions and parent hierarchy metadata in RAM.
-   - Delivers sub-microsecond (~1 µs) lookups on parent resolution, individual interactions, and warmed thread hierarchies, shielding PostgreSQL from connection contention during traffic spikes.
+   - Powered by a custom 64-way sharded LRU with doubly-linked lists, thread-based hierarchical caching, a global $O(1)$ node-to-thread lookup table, and in-memory `google/btree` feed indexing.
+   - Delivers sub-microsecond (~30 ns single node, ~450 ns full thread, ~2 µs feed pagination page) lookups on parent resolution, individual interactions, warmed thread hierarchies, and cursor-based feed pagination, shielding PostgreSQL from connection contention during traffic spikes.
 
 3. **Micro-Batch Ingestion Pipeline**:
    - A durable JetStream pull consumer fetches up to `DRAIN_BATCH_SIZE` messages within `DRAIN_FLUSH_INTERVAL` (defaults: 500 items / 50ms).
@@ -168,7 +168,7 @@ Note that `.env` is honoured by `make` targets only. The binary itself reads pla
 | `NATS_URL` | `nats://localhost:4222` | NATS JetStream broker URL |
 | `NATS_STREAM_NAME` | `BOARD` | JetStream stream name |
 | `NATS_CONSUMER_NAME` | `board-drainer` | Durable pull consumer name |
-| `MAX_CACHED_INTERACTIONS` | `500000` | In-memory cache capacity limit (FIFO eviction) |
+| `MAX_CACHED_INTERACTIONS` | `500000` | In-memory cache capacity limit (global thread-based LRU eviction) |
 | `CACHE_TTL` | `1h` | In-memory cache item time-to-live |
 | `DRAIN_BATCH_SIZE` | `500` | Drainer micro-batch size |
 | `DRAIN_FLUSH_INTERVAL`| `50ms` | Drainer flush window timeout |
