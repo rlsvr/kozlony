@@ -50,6 +50,11 @@ func (*mockPublisher) SubscribeEvents(_ context.Context, _ *string) (<-chan []by
 	return ch, func() {}, nil
 }
 
+func (*mockPublisher) SubscribeFilteredEvents(_ context.Context, _ *string, _ *uuid.UUID) (<-chan []byte, func(), error) {
+	ch := make(chan []byte, 10)
+	return ch, func() {}, nil
+}
+
 func (*mockPublisher) Ping(_ context.Context) error {
 	return nil
 }

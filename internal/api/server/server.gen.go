@@ -161,6 +161,9 @@ type CreateInteractionParams struct {
 type EventsInteractionsParams struct {
 	// GroupId Optional board/group filter.
 	GroupId *string `form:"group_id,omitempty" json:"group_id,omitempty"`
+
+	// RootId Optional thread root UUID filter. When set, client only receives events belonging to this conversation tree.
+	RootId *openapi_types.UUID `form:"root_id,omitempty" json:"root_id,omitempty"`
 }
 
 // CreateInteractionJSONRequestBody defines body for CreateInteraction for application/json ContentType.
@@ -282,6 +285,13 @@ func (w *ServerInterfaceWrapper) EventsInteractions(ctx echo.Context) error {
 	err = runtime.BindQueryParameterWithOptions("form", true, false, "group_id", ctx.QueryParams(), &params.GroupId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter group_id: %s", err))
+	}
+
+	// ------------- Optional query parameter "root_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "root_id", ctx.QueryParams(), &params.RootId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("Invalid format for parameter root_id: %s", err))
 	}
 
 	// Invoke the callback with all the unmarshaled arguments

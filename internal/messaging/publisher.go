@@ -6,24 +6,41 @@ import (
 	"errors"
 	"fmt"
 
+	"time"
+
+	"github.com/google/uuid"
 	natsio "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog/log"
 
 	"github.com/rlsvr/kozlony/internal/messaging/commands"
 	"github.com/rlsvr/kozlony/internal/messaging/events"
+	"github.com/rlsvr/kozlony/internal/messaging/fanout"
 )
 
-// Publisher embeds *Client and provides methods to publish domain events and commands to JetStream.
+// Publisher embeds *Client and provides methods to publish domain events and commands to JetStream,
+// while also managing SSE subscriber fan-out via a shared broker consumer and async pipeline.
 type Publisher struct {
 	*Client
+	fanoutPipeline *fanout.Pipeline
+	fanoutHub      *fanout.Hub
 }
 
 // NewPublisher initializes a new Publisher embedding the provided Client.
 func NewPublisher(client *Client) *Publisher {
-	return &Publisher{
+	p := &Publisher{
 		Client: client,
 	}
+
+	if client != nil && client.conn != nil && client.conn.Raw() != nil {
+		p.fanoutPipeline = fanout.NewPipeline(context.Background(), 5*time.Millisecond, 128)
+		p.fanoutHub = fanout.NewHub(p.fanoutPipeline, client.conn.Raw(), client.cfg.NATSStreamName)
+		if err := p.fanoutHub.Start(context.Background()); err != nil {
+			log.Warn().Err(err).Msg("failed to start shared fan-out hub")
+		}
+	}
+
+	return p
 }
 
 // PublishInteractionCreated publishes an InteractionCreatedEvent with Nats-Msg-Id deduplication.
@@ -118,52 +135,36 @@ func (p *Publisher) PublishReplyCountsRecalculated(ctx context.Context, evt *eve
 	return nil
 }
 
-// SubscribeEvents subscribes to live interaction events for a given group (or all groups if nil)
-// and returns a receive-only channel of raw JSON event payloads and a cleanup function.
-func (p *Publisher) SubscribeEvents(_ context.Context, groupID *string) (<-chan []byte, func(), error) {
+// SubscribeFilteredEvents subscribes to live interaction events for a given group and optional thread rootID
+// using the shared fan-out pipeline, eliminating per-connection NATS subscriptions.
+func (p *Publisher) SubscribeFilteredEvents(_ context.Context, groupID *string, rootID *uuid.UUID) (<-chan []byte, func(), error) {
 	if p == nil || p.Client == nil || p.conn == nil || p.conn.Raw() == nil {
 		return nil, nil, errors.New("nats client not connected")
 	}
+	if p.fanoutPipeline == nil {
+		return nil, nil, errors.New("fanout pipeline not initialized")
+	}
 
-	// Three namespaces are fanned out to SSE clients: creations on the "evt." subjects,
-	// edit notifications on the "audit." subjects, and recalculated reply counts on the "counter." subjects.
-	// Both edits and counters live outside "evt." so the drainer cannot consume them,
-	// which means SSE listens across all three explicitly.
-	createdSubject := SubjectAllEvents(p.cfg.NATSStreamName)
-	auditSubject := SubjectAllAuditEvents(p.cfg.NATSStreamName)
-	counterSubject := SubjectAllReplyCounts(p.cfg.NATSStreamName)
+	gID := DefaultGroupID
 	if groupID != nil && *groupID != "" {
-		createdSubject = fmt.Sprintf("%s.%s.evt.>", p.cfg.NATSStreamName, *groupID)
-		auditSubject = SubjectGroupAuditEvents(p.cfg.NATSStreamName, *groupID)
-		counterSubject = SubjectReplyCountsRecalculated(p.cfg.NATSStreamName, *groupID)
+		gID = *groupID
 	}
 
-	msgChan := make(chan []byte, 256)
-	handler := func(m *natsio.Msg) {
-		select {
-		case msgChan <- append([]byte(nil), m.Data...):
-		default:
-			log.Warn().Str("subject", m.Subject).Msg("sse event buffer full, dropping message")
-		}
-	}
-
-	raw := p.conn.Raw()
-	subs := make([]*natsio.Subscription, 0, 3)
-	for _, subject := range []string{createdSubject, auditSubject, counterSubject} {
-		sub, err := raw.Subscribe(subject, handler)
-		if err != nil {
-			for _, done := range subs {
-				_ = done.Unsubscribe()
-			}
-			return nil, nil, fmt.Errorf("subscribe to nats subject %s: %w", subject, err)
-		}
-		subs = append(subs, sub)
-	}
+	clientID := uuid.New().String()
+	client := fanout.NewClient(clientID, gID, rootID, 256)
+	p.fanoutPipeline.RegisterAndWait(client)
 
 	cleanup := func() {
-		for _, sub := range subs {
-			_ = sub.Unsubscribe()
-		}
+		p.fanoutPipeline.Remove(client)
+		client.Close()
 	}
-	return msgChan, cleanup, nil
+
+	return client.Events, cleanup, nil
+}
+
+// SubscribeEvents subscribes to live interaction events for a given group (or all groups if nil)
+// and returns a receive-only channel of raw JSON event payloads and a cleanup function.
+// It delegates to SubscribeFilteredEvents without a rootID filter.
+func (p *Publisher) SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error) {
+	return p.SubscribeFilteredEvents(ctx, groupID, nil)
 }

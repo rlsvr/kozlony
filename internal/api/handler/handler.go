@@ -37,6 +37,7 @@ type Publisher interface {
 	PublishInteractionCreated(ctx context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error)
 	PublishInteractionEdited(ctx context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error)
 	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
+	SubscribeFilteredEvents(ctx context.Context, groupID *string, rootID *uuid.UUID) (<-chan []byte, func(), error)
 }
 
 // Handler implements server.ServerInterface.
@@ -471,7 +472,11 @@ func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInter
 	}
 
 	reqCtx := ctx.Request().Context()
-	msgChan, cancelSub, err := h.publisher.SubscribeEvents(reqCtx, params.GroupId)
+	var rootUUID *uuid.UUID
+	if params.RootId != nil {
+		rootUUID = params.RootId
+	}
+	msgChan, cancelSub, err := h.publisher.SubscribeFilteredEvents(reqCtx, params.GroupId, rootUUID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to subscribe to NATS events for SSE")
 		return nil

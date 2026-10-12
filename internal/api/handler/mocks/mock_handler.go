@@ -13,6 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	uuid "github.com/google/uuid"
 	jetstream "github.com/nats-io/nats.go/jetstream"
 	events "github.com/rlsvr/kozlony/internal/messaging/events"
 	gomock "go.uber.org/mock/gomock"
@@ -100,4 +101,20 @@ func (m *MockPublisher) SubscribeEvents(ctx context.Context, groupID *string) (<
 func (mr *MockPublisherMockRecorder) SubscribeEvents(ctx, groupID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscribeEvents", reflect.TypeOf((*MockPublisher)(nil).SubscribeEvents), ctx, groupID)
+}
+
+// SubscribeFilteredEvents mocks base method.
+func (m *MockPublisher) SubscribeFilteredEvents(ctx context.Context, groupID *string, rootID *uuid.UUID) (<-chan []byte, func(), error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SubscribeFilteredEvents", ctx, groupID, rootID)
+	ret0, _ := ret[0].(<-chan []byte)
+	ret1, _ := ret[1].(func())
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SubscribeFilteredEvents indicates an expected call of SubscribeFilteredEvents.
+func (mr *MockPublisherMockRecorder) SubscribeFilteredEvents(ctx, groupID, rootID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscribeFilteredEvents", reflect.TypeOf((*MockPublisher)(nil).SubscribeFilteredEvents), ctx, groupID, rootID)
 }
