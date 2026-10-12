@@ -102,16 +102,10 @@ func (s *Sampler) Sample(ctx context.Context) SystemSnapshot {
 		KozlonyPID: s.kozlonyPID,
 	}
 
-	// Sample Kozlony Process
-	snap.Kozlony.CPUPercent, snap.Kozlony.RAMMegs = s.sampleProcess(ctx)
-
-	// Sample Docker containers for Postgres and NATS
-	s.sampleDockerContainers(ctx, &snap)
-
-	// Sample JetStream and Drainer status
+	// 1. Sample JetStream & Drainer metrics (instant HTTP call to NATS monitor)
 	s.sampleJetStream(ctx, &snap)
 
-	// Query DB metrics if connected
+	// 2. Query DB metrics if connected
 	if s.dbPool != nil {
 		row := s.dbPool.QueryRowContext(ctx, `
 			SELECT 
@@ -126,6 +120,12 @@ func (s *Sampler) Sample(ctx context.Context) SystemSnapshot {
 			snap.DBConnected = true
 		}
 	}
+
+	// 3. Sample Kozlony Process
+	snap.Kozlony.CPUPercent, snap.Kozlony.RAMMegs = s.sampleProcess(ctx)
+
+	// 4. Sample Docker containers for Postgres and NATS
+	s.sampleDockerContainers(ctx, &snap)
 
 	return snap
 }

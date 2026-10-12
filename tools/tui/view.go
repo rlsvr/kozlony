@@ -353,7 +353,7 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 		}
 		drainerPct = float64(drainerSeq) / float64(js.LastSeq)
 	}
-	drainerBar := gaugeMeterBar(drainerPct, cardWidth-38, colorAccent)
+	drainerBar := gaugeMeterBar(drainerPct, cardWidth-48, colorAccent)
 	drainerSyncLine := fmt.Sprintf("  %-18s %s %5.1f%% (seq %d / %d)",
 		styleMuted.Render("Drainer Progress:"),
 		drainerBar,
@@ -362,15 +362,14 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 		js.LastSeq,
 	)
 
-	// Consumers table
-	headerCols := fmt.Sprintf("  %-18s %-16s %-16s %-14s %s",
+	// Consumers table with strict column width formatting
+	headerCols := fmt.Sprintf("  %-20s %-16s %-18s %-14s %s",
 		styleMuted.Render("Consumer"),
 		styleMuted.Render("Pending Lag"),
 		styleMuted.Render("In-Flight (Ack)"),
 		styleMuted.Render("Redelivered"),
 		styleMuted.Render("Workers"),
 	)
-
 	drainerPendingStyle := styleOK
 	if js.Drainer.Pending > 500 {
 		drainerPendingStyle = styleWarn
@@ -387,19 +386,22 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 		counterPendingStyle = styleError
 	}
 
-	drainerRow := fmt.Sprintf("  %-18s %-16s %-16s %-14s %d waiting",
+	drainerPendingStr := drainerPendingStyle.Render(fmt.Sprintf("%d", js.Drainer.Pending))
+	counterPendingStr := counterPendingStyle.Render(fmt.Sprintf("%d", js.Counter.Pending))
+
+	drainerRow := fmt.Sprintf("  %-20s %-16s %-18d %-14d %d waiting",
 		styleAccent.Render("board-drainer"),
-		drainerPendingStyle.Render(fmt.Sprintf("%d", js.Drainer.Pending)),
-		fmt.Sprintf("%d", js.Drainer.AckPending),
-		fmt.Sprintf("%d", js.Drainer.Redelivered),
+		drainerPendingStr,
+		js.Drainer.AckPending,
+		js.Drainer.Redelivered,
 		js.Drainer.WaitingWorkers,
 	)
 
-	counterRow := fmt.Sprintf("  %-18s %-16s %-16s %-14s %d waiting",
+	counterRow := fmt.Sprintf("  %-20s %-16s %-18d %-14d %d waiting",
 		styleAccent.Render("board-counters"),
-		counterPendingStyle.Render(fmt.Sprintf("%d", js.Counter.Pending)),
-		fmt.Sprintf("%d", js.Counter.AckPending),
-		fmt.Sprintf("%d", js.Counter.Redelivered),
+		counterPendingStr,
+		js.Counter.AckPending,
+		js.Counter.Redelivered,
 		js.Counter.WaitingWorkers,
 	)
 
