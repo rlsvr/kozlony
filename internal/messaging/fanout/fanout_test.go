@@ -132,3 +132,57 @@ func TestFanoutClientBufferDrop(t *testing.T) {
 		t.Error("expected msg3 to fail on closed client")
 	}
 }
+
+func TestFanoutViewEpochRejectsStaleEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := fanout.NewPipeline(ctx, 1*time.Millisecond, 10)
+	defer p.Stop()
+
+	rootID1 := uuid.MustParse("01923f12-0000-7000-8000-000000000001")
+	rootID2 := uuid.MustParse("01923f12-0000-7000-8000-000000000002")
+
+	// Client starts on rootID1 with epoch 1
+	client := fanout.NewClient("c-view-switch", "root", &rootID1, 10)
+	p.RegisterAndWait(client)
+
+	if client.Epoch() != 1 {
+		t.Fatalf("expected initial epoch 1, got %d", client.Epoch())
+	}
+
+	// Stale event send simulation: snapshot had epoch 1, but client switches to epoch 2
+	client.BumpEpoch() // Now epoch 2
+
+	// An in-flight broadcast reading a snapshot recorded at epoch 1 attempts delivery:
+	delivered := client.SendWithEpoch([]byte("stale-event-from-view-1"), 1)
+	if delivered {
+		t.Fatal("expected SendWithEpoch to drop stale event from previous epoch")
+	}
+
+	// Verify buffer is empty
+	select {
+	case m := <-client.Events:
+		t.Fatalf("expected no event in channel, received: %s", string(m))
+	default:
+	}
+
+	// Now switch properly via SwitchAndWait to rootID2
+	p.SwitchAndWait(client, &rootID2)
+
+	// Broadcast for rootID2
+	msg2 := []byte(`{"id":"msg2","root_id":"01923f12-0000-7000-8000-000000000002","group_id":"root"}`)
+	d := p.Broadcast("root", &rootID2, msg2)
+	if d != 1 {
+		t.Fatalf("expected 1 delivered for new view, got %d", d)
+	}
+
+	select {
+	case m := <-client.Events:
+		if string(m) != string(msg2) {
+			t.Fatalf("expected %s, got %s", string(msg2), string(m))
+		}
+	default:
+		t.Fatal("expected client to receive event for new view")
+	}
+}

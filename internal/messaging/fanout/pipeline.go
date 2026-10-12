@@ -15,8 +15,14 @@ type Snapshot struct {
 	// feedClients: groupID -> clientID -> *Client (clients subscribed to the entire board feed)
 	feedClients map[string]map[string]*Client
 
+	// feedEpochs: groupID -> clientID -> epoch at registration/switch
+	feedEpochs map[string]map[string]uint64
+
 	// threadClients: "groupID:rootID" -> clientID -> *Client (clients subscribed to a specific conversation)
 	threadClients map[string]map[string]*Client
+
+	// threadEpochs: "groupID:rootID" -> clientID -> epoch at registration/switch
+	threadEpochs map[string]map[string]uint64
 
 	// totalClients count
 	totalClients int
@@ -25,7 +31,9 @@ type Snapshot struct {
 func newEmptySnapshot() *Snapshot {
 	return &Snapshot{
 		feedClients:   make(map[string]map[string]*Client),
+		feedEpochs:    make(map[string]map[string]uint64),
 		threadClients: make(map[string]map[string]*Client),
+		threadEpochs:  make(map[string]map[string]uint64),
 		totalClients:  0,
 	}
 }
@@ -110,8 +118,20 @@ func (p *Pipeline) RemoveAndWait(client *Client) {
 }
 
 // Switch updates a client's subscription focus (e.g. from feed to thread, or between threads).
+// It increments the client's view epoch to immediately reject stale messages.
 func (p *Pipeline) Switch(client *Client, newRootID *uuid.UUID) {
+	client.BumpEpoch()
 	p.requests <- pipelineRequest{op: opSwitch, client: client, newRootID: newRootID}
+}
+
+// SwitchAndWait updates a client's subscription focus, blocks until applied to the snapshot,
+// and drains any residual events from the client's buffer.
+func (p *Pipeline) SwitchAndWait(client *Client, newRootID *uuid.UUID) {
+	done := make(chan struct{})
+	client.BumpEpoch()
+	p.requests <- pipelineRequest{op: opSwitch, client: client, newRootID: newRootID, done: done}
+	<-done
+	client.Drain()
 }
 
 // Current returns the current immutable snapshot of subscribers.
@@ -128,6 +148,7 @@ func (p *Pipeline) TotalClients() int {
 // If rootID is nil, message is delivered to all feed subscribers of groupID.
 // If rootID is specified, message is delivered to both feed subscribers of groupID
 // and specific thread subscribers for that rootID.
+// Stale messages targeted at a client that switched views are discarded via epoch check.
 func (p *Pipeline) Broadcast(groupID string, rootID *uuid.UUID, data []byte) int {
 	snap := p.current.Load()
 	if snap.totalClients == 0 {
@@ -138,8 +159,10 @@ func (p *Pipeline) Broadcast(groupID string, rootID *uuid.UUID, data []byte) int
 
 	// 1. Deliver to feed subscribers of this group
 	if feeds, ok := snap.feedClients[groupID]; ok {
-		for _, client := range feeds {
-			if client.Send(data) {
+		epochs := snap.feedEpochs[groupID]
+		for id, client := range feeds {
+			expEpoch := epochs[id]
+			if client.SendWithEpoch(data, expEpoch) {
 				delivered++
 			}
 		}
@@ -149,8 +172,10 @@ func (p *Pipeline) Broadcast(groupID string, rootID *uuid.UUID, data []byte) int
 	if rootID != nil {
 		key := threadKey(groupID, *rootID)
 		if threads, ok := snap.threadClients[key]; ok {
-			for _, client := range threads {
-				if client.Send(data) {
+			epochs := snap.threadEpochs[key]
+			for id, client := range threads {
+				expEpoch := epochs[id]
+				if client.SendWithEpoch(data, expEpoch) {
 					delivered++
 				}
 			}
@@ -218,7 +243,9 @@ func (p *Pipeline) applyBatch(batch []pipelineRequest) {
 func copySnapshot(src *Snapshot) *Snapshot {
 	dst := &Snapshot{
 		feedClients:   make(map[string]map[string]*Client, len(src.feedClients)),
+		feedEpochs:    make(map[string]map[string]uint64, len(src.feedEpochs)),
 		threadClients: make(map[string]map[string]*Client, len(src.threadClients)),
+		threadEpochs:  make(map[string]map[string]uint64, len(src.threadEpochs)),
 		totalClients:  src.totalClients,
 	}
 
@@ -230,12 +257,28 @@ func copySnapshot(src *Snapshot) *Snapshot {
 		dst.feedClients[groupID] = groupCopy
 	}
 
+	for groupID, epochs := range src.feedEpochs {
+		epochCopy := make(map[string]uint64, len(epochs))
+		for id, ep := range epochs {
+			epochCopy[id] = ep
+		}
+		dst.feedEpochs[groupID] = epochCopy
+	}
+
 	for key, clients := range src.threadClients {
 		threadCopy := make(map[string]*Client, len(clients))
 		for id, c := range clients {
 			threadCopy[id] = c
 		}
 		dst.threadClients[key] = threadCopy
+	}
+
+	for key, epochs := range src.threadEpochs {
+		epochCopy := make(map[string]uint64, len(epochs))
+		for id, ep := range epochs {
+			epochCopy[id] = ep
+		}
+		dst.threadEpochs[key] = epochCopy
 	}
 
 	return dst
@@ -258,10 +301,16 @@ func addFeedClient(snap *Snapshot, c *Client) {
 		group = make(map[string]*Client)
 		snap.feedClients[c.GroupID] = group
 	}
+	epochs, ok := snap.feedEpochs[c.GroupID]
+	if !ok {
+		epochs = make(map[string]uint64)
+		snap.feedEpochs[c.GroupID] = epochs
+	}
 	if _, exists := group[c.ID]; !exists {
 		snap.totalClients++
 	}
 	group[c.ID] = c
+	epochs[c.ID] = c.Epoch()
 }
 
 func addThreadClient(snap *Snapshot, c *Client) {
@@ -271,10 +320,16 @@ func addThreadClient(snap *Snapshot, c *Client) {
 		group = make(map[string]*Client)
 		snap.threadClients[key] = group
 	}
+	epochs, ok := snap.threadEpochs[key]
+	if !ok {
+		epochs = make(map[string]uint64)
+		snap.threadEpochs[key] = epochs
+	}
 	if _, exists := group[c.ID]; !exists {
 		snap.totalClients++
 	}
 	group[c.ID] = c
+	epochs[c.ID] = c.Epoch()
 }
 
 func removeClientFromSnapshot(snap *Snapshot, c *Client) {
@@ -294,6 +349,12 @@ func removeFeedClient(snap *Snapshot, c *Client) {
 	}
 	if _, exists := group[c.ID]; exists {
 		delete(group, c.ID)
+		if epochs, ok := snap.feedEpochs[c.GroupID]; ok {
+			delete(epochs, c.ID)
+			if len(epochs) == 0 {
+				delete(snap.feedEpochs, c.GroupID)
+			}
+		}
 		snap.totalClients--
 		if len(group) == 0 {
 			delete(snap.feedClients, c.GroupID)
@@ -309,6 +370,12 @@ func removeThreadClient(snap *Snapshot, c *Client) {
 	}
 	if _, exists := group[c.ID]; exists {
 		delete(group, c.ID)
+		if epochs, ok := snap.threadEpochs[key]; ok {
+			delete(epochs, c.ID)
+			if len(epochs) == 0 {
+				delete(snap.threadEpochs, key)
+			}
+		}
 		snap.totalClients--
 		if len(group) == 0 {
 			delete(snap.threadClients, key)
