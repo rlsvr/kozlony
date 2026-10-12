@@ -330,8 +330,6 @@ func (mr *MockRepositoryMockRecorder) Update(ctx, id, expectedVersion, title, bo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockRepository)(nil).Update), ctx, id, expectedVersion, title, body)
 }
 
-
-
 // MockrowQuerier is a mock of rowQuerier interface.
 type MockrowQuerier struct {
 	ctrl     *gomock.Controller

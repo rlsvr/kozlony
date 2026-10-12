@@ -12,6 +12,7 @@ package mocks
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	uuid "github.com/google/uuid"
 	database "github.com/rlsvr/kozlony/internal/database"
@@ -71,16 +72,102 @@ func (mr *MockInteractionCacheMockRecorder) Get(ctx, id any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockInteractionCache)(nil).Get), ctx, id)
 }
 
-// Set mocks base method.
-func (m *MockInteractionCache) Set(ctx context.Context, item *database.Interaction) error {
+// GetThread mocks base method.
+func (m *MockInteractionCache) GetThread(ctx context.Context, rootID uuid.UUID) ([]*database.Interaction, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Set", ctx, item)
+	ret := m.ctrl.Call(m, "GetThread", ctx, rootID)
+	ret0, _ := ret[0].([]*database.Interaction)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetThread indicates an expected call of GetThread.
+func (mr *MockInteractionCacheMockRecorder) GetThread(ctx, rootID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetThread", reflect.TypeOf((*MockInteractionCache)(nil).GetThread), ctx, rootID)
+}
+
+// ListFeed mocks base method.
+func (m *MockInteractionCache) ListFeed(ctx context.Context, groupID string, limit int, before *time.Time) ([]*database.Interaction, bool) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListFeed", ctx, groupID, limit, before)
+	ret0, _ := ret[0].([]*database.Interaction)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
+}
+
+// ListFeed indicates an expected call of ListFeed.
+func (mr *MockInteractionCacheMockRecorder) ListFeed(ctx, groupID, limit, before any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListFeed", reflect.TypeOf((*MockInteractionCache)(nil).ListFeed), ctx, groupID, limit, before)
+}
+
+// Put mocks base method.
+func (m *MockInteractionCache) Put(ctx context.Context, item *database.Interaction) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Put", ctx, item)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// Set indicates an expected call of Set.
-func (mr *MockInteractionCacheMockRecorder) Set(ctx, item any) *gomock.Call {
+// Put indicates an expected call of Put.
+func (mr *MockInteractionCacheMockRecorder) Put(ctx, item any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockInteractionCache)(nil).Set), ctx, item)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Put", reflect.TypeOf((*MockInteractionCache)(nil).Put), ctx, item)
+}
+
+// PutThread mocks base method.
+func (m *MockInteractionCache) PutThread(ctx context.Context, rootID uuid.UUID, items []*database.Interaction) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PutThread", ctx, rootID, items)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PutThread indicates an expected call of PutThread.
+func (mr *MockInteractionCacheMockRecorder) PutThread(ctx, rootID, items any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PutThread", reflect.TypeOf((*MockInteractionCache)(nil).PutThread), ctx, rootID, items)
+}
+
+// TotalWeight mocks base method.
+func (m *MockInteractionCache) TotalWeight() int {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TotalWeight")
+	ret0, _ := ret[0].(int)
+	return ret0
+}
+
+// TotalWeight indicates an expected call of TotalWeight.
+func (mr *MockInteractionCacheMockRecorder) TotalWeight() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TotalWeight", reflect.TypeOf((*MockInteractionCache)(nil).TotalWeight))
+}
+
+// Update mocks base method.
+func (m *MockInteractionCache) Update(ctx context.Context, item *database.Interaction) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Update", ctx, item)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Update indicates an expected call of Update.
+func (mr *MockInteractionCacheMockRecorder) Update(ctx, item any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockInteractionCache)(nil).Update), ctx, item)
+}
+
+// UpdateReplyCount mocks base method.
+func (m *MockInteractionCache) UpdateReplyCount(ctx context.Context, id uuid.UUID, count int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateReplyCount", ctx, id, count)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateReplyCount indicates an expected call of UpdateReplyCount.
+func (mr *MockInteractionCacheMockRecorder) UpdateReplyCount(ctx, id, count any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateReplyCount", reflect.TypeOf((*MockInteractionCache)(nil).UpdateReplyCount), ctx, id, count)
 }
