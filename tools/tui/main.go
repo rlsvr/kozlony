@@ -21,6 +21,7 @@ func main() {
 		targetURL   = flag.String("url", "http://localhost:8080", "Base URL of the Kozlony API for display")
 		kozlonyPID  = flag.Int("pid", 0, "PID of Kozlony server (0 for auto-detect)")
 		databaseURL = flag.String("db", "", "PostgreSQL connection string (defaults to local docker port 5433)")
+		natsMonURL  = flag.String("nats-mon", "http://localhost:8223", "NATS monitoring HTTP URL (defaults to http://localhost:8223)")
 	)
 	flag.Parse()
 
@@ -49,7 +50,7 @@ func main() {
 		dbConn = "postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"
 	}
 
-	sampler := NewSampler(detectedPID, dbConn)
+	sampler := NewSampler(detectedPID, dbConn, *natsMonURL)
 	model := NewModel(*statusFile, *targetURL, sampler)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 

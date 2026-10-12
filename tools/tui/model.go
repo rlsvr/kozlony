@@ -122,6 +122,7 @@ func (m Model) View() string {
 
 	header := renderHeader(m)
 	workloadCard := renderWorkloadCard(m, cardWidth)
+	drainerCard := renderJetStreamCard(m, cardWidth)
 	resourceCard := renderResourceCard(m, cardWidth)
 	dbCard := renderDatabaseCard(m, cardWidth)
 	footer := renderFooter(m)
@@ -130,6 +131,8 @@ func (m Model) View() string {
 		header,
 		"",
 		workloadCard,
+		"",
+		drainerCard,
 		"",
 		resourceCard,
 		"",

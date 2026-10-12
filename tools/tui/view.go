@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -320,6 +321,132 @@ func renderDatabaseCard(m Model, cardWidth int) string {
 	)
 
 	return styleCard.Width(cardWidth).Render(body)
+}
+
+func renderJetStreamCard(m Model, cardWidth int) string {
+	cardTitle := styleCardTitle.Render("JETSTREAM & DRAINER PIPELINE TELEMETRY")
+	js := m.sysSnap.JetStream
+
+	jsStatus := styleOK.Render("● HEALTHY")
+	if !js.Connected {
+		jsStatus = styleMuted.Render("STANDBY (NATS monitor inactive)")
+	} else if js.Drainer.Pending > 1000 || js.Drainer.Redelivered > 50 {
+		jsStatus = styleWarn.Render("▲ BACKPRESSURE / RETRIES")
+	}
+
+	totalMsgsFormatted := fmt.Sprintf("%d", js.TotalMessages)
+	bytesFormatted := formatBytes(js.TotalBytes)
+
+	line1 := fmt.Sprintf("  %-16s %s | %-12s %s | %-10s %s | %-10s %s",
+		styleMuted.Render("Stream State:"), jsStatus,
+		styleMuted.Render("Stream:"), styleAccent.Render(js.StreamName),
+		styleMuted.Render("Messages:"), totalMsgsFormatted,
+		styleMuted.Render("Storage:"), bytesFormatted,
+	)
+
+	// Gauge meter for Drainer lag synchronization
+	drainerPct := 1.0
+	if js.LastSeq > 0 {
+		drainerSeq := js.Drainer.AckFloorSeq
+		if drainerSeq > js.LastSeq {
+			drainerSeq = js.LastSeq
+		}
+		drainerPct = float64(drainerSeq) / float64(js.LastSeq)
+	}
+	drainerBar := gaugeMeterBar(drainerPct, cardWidth-38, colorAccent)
+	drainerSyncLine := fmt.Sprintf("  %-18s %s %5.1f%% (seq %d / %d)",
+		styleMuted.Render("Drainer Progress:"),
+		drainerBar,
+		drainerPct*100.0,
+		js.Drainer.AckFloorSeq,
+		js.LastSeq,
+	)
+
+	// Consumers table
+	headerCols := fmt.Sprintf("  %-18s %-16s %-16s %-14s %s",
+		styleMuted.Render("Consumer"),
+		styleMuted.Render("Pending Lag"),
+		styleMuted.Render("In-Flight (Ack)"),
+		styleMuted.Render("Redelivered"),
+		styleMuted.Render("Workers"),
+	)
+
+	drainerPendingStyle := styleOK
+	if js.Drainer.Pending > 500 {
+		drainerPendingStyle = styleWarn
+	}
+	if js.Drainer.Pending > 5000 {
+		drainerPendingStyle = styleError
+	}
+
+	counterPendingStyle := styleOK
+	if js.Counter.Pending > 500 {
+		counterPendingStyle = styleWarn
+	}
+	if js.Counter.Pending > 5000 {
+		counterPendingStyle = styleError
+	}
+
+	drainerRow := fmt.Sprintf("  %-18s %-16s %-16s %-14s %d waiting",
+		styleAccent.Render("board-drainer"),
+		drainerPendingStyle.Render(fmt.Sprintf("%d", js.Drainer.Pending)),
+		fmt.Sprintf("%d", js.Drainer.AckPending),
+		fmt.Sprintf("%d", js.Drainer.Redelivered),
+		js.Drainer.WaitingWorkers,
+	)
+
+	counterRow := fmt.Sprintf("  %-18s %-16s %-16s %-14s %d waiting",
+		styleAccent.Render("board-counters"),
+		counterPendingStyle.Render(fmt.Sprintf("%d", js.Counter.Pending)),
+		fmt.Sprintf("%d", js.Counter.AckPending),
+		fmt.Sprintf("%d", js.Counter.Redelivered),
+		js.Counter.WaitingWorkers,
+	)
+
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		cardTitle,
+		"",
+		line1,
+		"",
+		drainerSyncLine,
+		"",
+		headerCols,
+		drainerRow,
+		counterRow,
+	)
+
+	return styleCard.Width(cardWidth).Render(body)
+}
+
+func gaugeMeterBar(percent float64, width int, barColor lipgloss.Color) string {
+	if width < 8 {
+		width = 8
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 1.0 {
+		percent = 1.0
+	}
+	p := progress.New(
+		progress.WithWidth(width),
+		progress.WithoutPercentage(),
+		progress.WithSolidFill(string(barColor)),
+	)
+	return p.ViewAs(percent)
+}
+
+func formatBytes(b uint64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := uint64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func renderFooter(m Model) string {
