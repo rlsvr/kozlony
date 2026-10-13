@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,11 @@ type BatchFetcher interface {
 	Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
 }
 
+// PartitionBatchFetcher fetches a micro-batch of messages from a specific partition.
+type PartitionBatchFetcher interface {
+	FetchPartition(partition int, batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error)
+}
+
 // DLQPublisher forwards dead-letter / poison messages to the DLQ subject.
 type DLQPublisher interface {
 	PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error
@@ -37,12 +43,17 @@ type ReplyCountPublisher interface {
 // Drainer micro-batches interaction events from NATS JetStream and bulk-inserts them into PostgreSQL.
 type Drainer struct {
 	fetcher        BatchFetcher
+	partFetcher    PartitionBatchFetcher
+	numPartitions  int
 	repo           database.Repository
 	dlq            DLQPublisher
 	countPublisher ReplyCountPublisher
 	batchSize      int
 	flushInterval  time.Duration
 	workers        int
+
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
 }
 
 // New creates a new Drainer instance.
@@ -72,6 +83,7 @@ func newDrainer(
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	workers := 1
+	numPartitions := 1
 	if cfg != nil {
 		if cfg.DrainBatchSize > 0 {
 			batchSize = cfg.DrainBatchSize
@@ -82,10 +94,20 @@ func newDrainer(
 		if cfg.NATSConcurrentSubscribers > 0 {
 			workers = cfg.NATSConcurrentSubscribers
 		}
+		if cfg.IngestPartitions > 0 {
+			numPartitions = cfg.IngestPartitions
+		}
+	}
+
+	var partFetcher PartitionBatchFetcher
+	if pf, ok := fetcher.(PartitionBatchFetcher); ok {
+		partFetcher = pf
 	}
 
 	return &Drainer{
 		fetcher:        fetcher,
+		partFetcher:    partFetcher,
+		numPartitions:  numPartitions,
 		repo:           repo,
 		dlq:            dlq,
 		countPublisher: countPublisher,
@@ -95,10 +117,23 @@ func newDrainer(
 	}
 }
 
-// ProcessBatch fetches a single batch of messages up to batchSize within flushInterval,
-// deserializes interaction events, writes them in bulk to PostgreSQL, and acknowledges them.
+// ProcessBatch fetches a single batch from partition 0 (or fallback fetcher).
 func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
-	mb, err := d.fetcher.Fetch(d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
+	return d.ProcessBatchForPartition(ctx, 0)
+}
+
+// ProcessBatchForPartition fetches a single batch of messages for the given partition,
+// deserializes interaction events, writes them in bulk to PostgreSQL, and acknowledges them.
+func (d *Drainer) ProcessBatchForPartition(ctx context.Context, partition int) (int, error) {
+	var (
+		mb  jetstream.MessageBatch
+		err error
+	)
+	if d.partFetcher != nil {
+		mb, err = d.partFetcher.FetchPartition(partition, d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
+	} else {
+		mb, err = d.fetcher.Fetch(d.batchSize, jetstream.FetchMaxWait(d.flushInterval))
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, nil
@@ -147,16 +182,14 @@ func (d *Drainer) ProcessBatch(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("insert batch: %w", err)
 	}
 
-	// Only ack after the rows are durably committed. The reply count event is published
-	// after that too: publishing it first would announce counts for rows that may not
-	// exist yet if the transaction rolls back.
+	// Only ack after the rows are durably committed.
 	for _, m := range rawMsgs {
 		_ = m.Ack()
 	}
 
 	d.publishReplyCounts(ctx, interactions, counts)
 
-	log.Debug().Int("count", len(interactions)).Msg("successfully drained micro-batch to postgres")
+	log.Debug().Int("count", len(interactions)).Int("partition", partition).Msg("successfully drained micro-batch to postgres")
 	return len(interactions), nil
 }
 
@@ -235,8 +268,14 @@ func (d *Drainer) Workers() int {
 
 // RunWorker continuously processes micro-batches for a specific worker until ctx is canceled.
 func (d *Drainer) RunWorker(ctx context.Context, workerID int) error {
+	partition := 0
+	if d.numPartitions > 1 {
+		partition = (workerID - 1) % d.numPartitions
+	}
+
 	log.Info().
 		Int("worker_id", workerID).
+		Int("partition", partition).
 		Int("batch_size", d.batchSize).
 		Dur("flush_interval", d.flushInterval).
 		Msg("starting JetStream micro-batch drainer worker")
@@ -244,11 +283,11 @@ func (d *Drainer) RunWorker(ctx context.Context, workerID int) error {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info().Int("worker_id", workerID).Msg("stopping micro-batch drainer worker")
+			log.Info().Int("worker_id", workerID).Int("partition", partition).Msg("stopping micro-batch drainer worker")
 			return nil
 		default:
-			if _, err := d.ProcessBatch(ctx); err != nil {
-				log.Error().Err(err).Int("worker_id", workerID).Msg("error processing micro-batch")
+			if _, err := d.ProcessBatchForPartition(ctx, partition); err != nil {
+				log.Error().Err(err).Int("worker_id", workerID).Int("partition", partition).Msg("error processing micro-batch")
 				select {
 				case <-ctx.Done():
 					return nil
@@ -264,16 +303,30 @@ func (d *Drainer) Run(ctx context.Context) error {
 	return d.RunWorker(ctx, 1)
 }
 
-// Start runs the drainer workers in background goroutines until ctx is canceled.
+// Start runs the drainer workers in background goroutines until ctx is canceled or Stop is called.
 func (d *Drainer) Start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	d.cancel = cancel
+
 	for i := 0; i < d.workers; i++ {
 		workerID := i + 1
+		d.wg.Add(1)
 		go func(id int) {
+			defer d.wg.Done()
 			if err := d.RunWorker(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
 				log.Error().Err(err).Int("worker_id", id).Msg("micro-batch drainer worker exited with error")
 			}
 		}(workerID)
 	}
+}
+
+// Stop signals the workers to finish and blocks until they have exited, so the caller can
+// close the database pool without racing an in-flight InsertBatchWithCounts.
+func (d *Drainer) Stop() {
+	if d.cancel != nil {
+		d.cancel()
+	}
+	d.wg.Wait()
 }
 
 // Start creates a new Drainer and starts its background processing loop.

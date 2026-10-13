@@ -115,22 +115,40 @@ type Repository interface {
 	ListFeed(ctx context.Context, groupID string, limit int, before *time.Time) ([]*Interaction, error)
 }
 
-// InteractionRepository implements Repository using PgxPool.
+// InteractionRepository implements Repository using separate pools for writes and reads.
 type InteractionRepository struct {
-	pool PgxPool
+	pool     PgxPool // primary/write pool
+	readPool PgxPool // read pool for queries (falls back to pool if nil)
 }
 
-// NewInteractionRepository constructs a new InteractionRepository.
+// NewInteractionRepository constructs a new InteractionRepository with a shared pool.
 func NewInteractionRepository(pool PgxPool) *InteractionRepository {
-	return &InteractionRepository{pool: pool}
+	return NewInteractionRepositoryWithPools(pool, pool)
 }
 
-// Ping verifies database connectivity.
+// NewInteractionRepositoryWithPools constructs an InteractionRepository with isolated write and read pools.
+func NewInteractionRepositoryWithPools(writePool, readPool PgxPool) *InteractionRepository {
+	if readPool == nil {
+		readPool = writePool
+	}
+	return &InteractionRepository{
+		pool:     writePool,
+		readPool: readPool,
+	}
+}
+
+// Ping verifies database connectivity on both pools.
 func (r *InteractionRepository) Ping(ctx context.Context) error {
 	if r.pool == nil {
 		return errors.New("database pool is nil")
 	}
-	return r.pool.Ping(ctx)
+	if err := r.pool.Ping(ctx); err != nil {
+		return err
+	}
+	if r.readPool != nil && r.readPool != r.pool {
+		return r.readPool.Ping(ctx)
+	}
+	return nil
 }
 
 // Insert writes a single interaction to PostgreSQL.
@@ -220,48 +238,83 @@ func (r *InteractionRepository) InsertBatchWithCounts(ctx context.Context, items
 	return counts, nil
 }
 
-// insertBatchRows pipelines the inserts for a batch onto the given transaction.
+// insertBatchRows bulk inserts a batch using a single multi-row unnest statement.
 func insertBatchRows(ctx context.Context, tx pgx.Tx, items []*Interaction) error {
-	batch := &pgx.Batch{}
-	query := `
-		INSERT INTO interactions (
-			id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-		) ON CONFLICT (id) DO NOTHING;
-	`
+	if len(items) == 0 {
+		return nil
+	}
 
-	for _, item := range items {
+	n := len(items)
+	ids := make([]uuid.UUID, n)
+	groupIDs := make([]string, n)
+	rootIDs := make([]*uuid.UUID, n)
+	parentIDs := make([]*uuid.UUID, n)
+	titles := make([]*string, n)
+	bodies := make([]string, n)
+	authors := make([]string, n)
+	createdAts := make([]time.Time, n)
+	updatedAts := make([]*time.Time, n)
+	replyCounts := make([]int, n)
+	depths := make([]int, n)
+	versions := make([]int, n)
+
+	for i, item := range items {
 		version := item.Version
 		if version <= 0 {
 			version = 1
 		}
-		batch.Queue(query,
-			item.ID,
-			item.GroupID,
-			item.RootID,
-			item.ParentID,
-			item.Title,
-			item.Body,
-			item.Author,
-			item.CreatedAt,
-			item.UpdatedAt,
-			item.ReplyCount,
-			item.Depth,
-			version,
-		)
+		ids[i] = item.ID
+		groupIDs[i] = item.GroupID
+		rootIDs[i] = item.RootID
+		parentIDs[i] = item.ParentID
+		titles[i] = item.Title
+		bodies[i] = item.Body
+		authors[i] = item.Author
+		createdAts[i] = item.CreatedAt
+		updatedAts[i] = item.UpdatedAt
+		replyCounts[i] = item.ReplyCount
+		depths[i] = item.Depth
+		versions[i] = version
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	for range items {
-		if _, err := br.Exec(); err != nil {
-			_ = br.Close()
-			return fmt.Errorf("execute batch item: %w", err)
-		}
+	query := `
+		INSERT INTO interactions (
+			id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version
+		)
+		SELECT * FROM unnest(
+			$1::uuid[],
+			$2::varchar[],
+			$3::uuid[],
+			$4::uuid[],
+			$5::varchar[],
+			$6::text[],
+			$7::varchar[],
+			$8::timestamptz[],
+			$9::timestamptz[],
+			$10::int[],
+			$11::int[],
+			$12::int[]
+		)
+		ON CONFLICT (id) DO NOTHING;
+	`
+
+	if _, err := tx.Exec(ctx, query,
+		ids,
+		groupIDs,
+		rootIDs,
+		parentIDs,
+		titles,
+		bodies,
+		authors,
+		createdAts,
+		updatedAts,
+		replyCounts,
+		depths,
+		versions,
+	); err != nil {
+		return fmt.Errorf("execute bulk unnest insert: %w", err)
 	}
-	if err := br.Close(); err != nil {
-		return fmt.Errorf("close batch results: %w", err)
-	}
+
 	return nil
 }
 
@@ -544,7 +597,7 @@ func (r *InteractionRepository) GetByID(ctx context.Context, id uuid.UUID) (*Int
 		FROM interactions
 		WHERE id = $1;
 	`
-	row := r.pool.QueryRow(ctx, query, id)
+	row := r.readPool.QueryRow(ctx, query, id)
 
 	var item Interaction
 	err := row.Scan(
@@ -579,7 +632,7 @@ func (r *InteractionRepository) GetThread(ctx context.Context, rootID uuid.UUID)
 		WHERE id = $1 OR root_id = $1
 		ORDER BY created_at ASC;
 	`
-	rows, err := r.pool.Query(ctx, query, rootID)
+	rows, err := r.readPool.Query(ctx, query, rootID)
 	if err != nil {
 		return nil, fmt.Errorf("query thread: %w", err)
 	}
@@ -636,7 +689,7 @@ func (r *InteractionRepository) ListFeed(ctx context.Context, groupID string, li
 			ORDER BY created_at DESC
 			LIMIT $3;
 		`
-		rows, err = r.pool.Query(ctx, query, groupID, *before, limit)
+		rows, err = r.readPool.Query(ctx, query, groupID, *before, limit)
 	} else {
 		query := `
 			SELECT id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version
@@ -645,7 +698,7 @@ func (r *InteractionRepository) ListFeed(ctx context.Context, groupID string, li
 			ORDER BY created_at DESC
 			LIMIT $2;
 		`
-		rows, err = r.pool.Query(ctx, query, groupID, limit)
+		rows, err = r.readPool.Query(ctx, query, groupID, limit)
 	}
 
 	if err != nil {

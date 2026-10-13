@@ -56,11 +56,15 @@ type Config struct {
 	NATSAckWait               time.Duration `env:"NATS_ACK_WAIT,default=30s"`
 	NATSConcurrentSubscribers int           `env:"NATS_CONCURRENT_SUBSCRIBERS,default=32"`
 	NATSStreamRetention       time.Duration `env:"NATS_STREAM_RETENTION,default=336h"`
+	IngestPartitions          int           `env:"INGEST_PARTITIONS,default=16"`
+	LivePrefix                string        `env:"LIVE_PREFIX,default=LIVE"`
 
 	// PostgreSQL persistence configuration
-	DatabaseURL      string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"`
-	DatabaseMaxConns int    `env:"DATABASE_MAX_CONNS,default=50"`
-	DatabaseMinConns int    `env:"DATABASE_MIN_CONNS,default=10"`
+	DatabaseURL           string `env:"DATABASE_URL,default=postgres://postgres:postgres@localhost:5433/messageboard?sslmode=disable"`
+	DatabaseMaxConns      int    `env:"DATABASE_MAX_CONNS,default=50"`
+	DatabaseMinConns      int    `env:"DATABASE_MIN_CONNS,default=10"`
+	DatabaseWriteMaxConns int    `env:"DATABASE_WRITE_MAX_CONNS,default=30"`
+	DatabaseReadMaxConns  int    `env:"DATABASE_READ_MAX_CONNS,default=20"`
 
 	// In-memory hot cache configuration
 	MaxCachedInteractions int           `env:"MAX_CACHED_INTERACTIONS,default=500000"`
