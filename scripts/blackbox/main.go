@@ -205,7 +205,7 @@ func setupNATSSubscriber(natsURL, groupID string) (*natsio.Conn, <-chan *natsio.
 	}
 
 	eventsChan := make(chan *natsio.Msg, 64)
-	sub, err := nc.Subscribe(fmt.Sprintf("BOARD.%s.evt.>", groupID), func(msg *natsio.Msg) {
+	sub, err := nc.Subscribe(fmt.Sprintf("LIVE.%s.>", groupID), func(msg *natsio.Msg) {
 		select {
 		case eventsChan <- msg:
 		default:
@@ -225,37 +225,27 @@ func setupNATSSubscriber(natsURL, groupID string) (*natsio.Conn, <-chan *natsio.
 
 func startSSEListener(ctx context.Context, apiURL, groupID string) (<-chan string, func(), error) {
 	sseURL := fmt.Sprintf("%s/v1/interactions/events?group_id=%s", apiURL, groupID)
-	reqProbe, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
+	reqStream, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	reqProbe.Header.Set("Accept", "text/event-stream")
+	reqStream.Header.Set("Accept", "text/event-stream")
 
-	respProbe, err := http.DefaultClient.Do(reqProbe)
+	respStream, err := http.DefaultClient.Do(reqStream) //nolint:bodyclose // closed by reader goroutine and stop callback
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { _ = respProbe.Body.Close() }()
 
-	if respProbe.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("expected 200 for SSE, got %d", respProbe.StatusCode)
+	if respStream.StatusCode != http.StatusOK {
+		_ = respStream.Body.Close()
+		return nil, nil, fmt.Errorf("expected 200 for SSE, got %d", respStream.StatusCode)
 	}
 
 	sseChan := make(chan string, 32)
 	done := make(chan struct{})
 
 	go func() {
-		reqStream, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
-		if err != nil {
-			return
-		}
-		reqStream.Header.Set("Accept", "text/event-stream")
-		respStream, err := http.DefaultClient.Do(reqStream)
-		if err != nil {
-			return
-		}
 		defer func() { _ = respStream.Body.Close() }()
-
 		scanner := bufio.NewScanner(respStream.Body)
 		for scanner.Scan() {
 			select {
@@ -270,8 +260,12 @@ func startSSEListener(ctx context.Context, apiURL, groupID string) (<-chan strin
 		}
 	}()
 
+	// Allow the server-side pipeline actor to register the client subscription into the snapshot
+	time.Sleep(30 * time.Millisecond)
+
 	stop := func() {
 		close(done)
+		_ = respStream.Body.Close()
 	}
 	return sseChan, stop, nil
 }

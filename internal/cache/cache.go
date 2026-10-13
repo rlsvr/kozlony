@@ -134,12 +134,12 @@ func (c *ShardedMemoryCache) Get(_ context.Context, id uuid.UUID) (*database.Int
 // GetThread retrieves all interactions in a thread sorted chronologically.
 func (c *ShardedMemoryCache) GetThread(_ context.Context, rootID uuid.UUID) ([]*database.Interaction, error) {
 	shard := c.shardFor(rootID)
-	thread, found := shard.GetThread(rootID)
+	interactions, found := shard.GetThreadInteractions(rootID)
 	if !found {
 		return nil, ErrNotFound
 	}
 
-	return thread.AllInteractionsChronological(), nil
+	return interactions, nil
 }
 
 func (c *ShardedMemoryCache) putRoot(item *database.Interaction) {

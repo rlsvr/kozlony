@@ -39,6 +39,20 @@ func (s *LRUShard) GetThread(rootID uuid.UUID) (*Thread, bool) {
 	return thread, true
 }
 
+// GetThreadInteractions retrieves all interactions in a thread sorted chronologically
+// while holding the shard lock to prevent concurrent map modification during iteration.
+func (s *LRUShard) GetThreadInteractions(rootID uuid.UUID) ([]*database.Interaction, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	thread, ok := s.threads[rootID]
+	if !ok {
+		return nil, false
+	}
+	s.promote(thread)
+	return thread.AllInteractionsChronological(), true
+}
+
 // GetThreadReadOnly retrieves a thread without promoting it (for read-heavy paths when promotion isn't required).
 func (s *LRUShard) GetThreadReadOnly(rootID uuid.UUID) (*Thread, bool) {
 	s.mu.RLock()
