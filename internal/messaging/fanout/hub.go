@@ -24,14 +24,14 @@ type eventEnvelope struct {
 	RootID  *string `json:"root_id,omitempty"`
 }
 
-// Hub bridges NATS JetStream events into the fan-out Pipeline with a single broker subscription.
+// Hub bridges NATS events into the fan-out Pipeline using dynamic, on-demand subscriptions per active group.
 type Hub struct {
 	pipeline *Pipeline
 	conn     *natsio.Conn
 	stream   string
 
-	mu   sync.Mutex
-	subs []*natsio.Subscription
+	mu        sync.Mutex
+	groupSubs map[string][]*natsio.Subscription
 }
 
 // NewHub initializes an event fan-out Hub.
@@ -40,57 +40,112 @@ func NewHub(pipeline *Pipeline, conn *natsio.Conn, stream string) *Hub {
 		stream = defaultStreamName
 	}
 	return &Hub{
-		pipeline: pipeline,
-		conn:     conn,
-		stream:   stream,
+		pipeline:  pipeline,
+		conn:      conn,
+		stream:    stream,
+		groupSubs: make(map[string][]*natsio.Subscription),
 	}
 }
 
-// Start begins consuming events from NATS and routing them to the fanout pipeline.
-func (h *Hub) Start(_ context.Context) error {
+// SetPipeline updates the fan-out pipeline associated with this hub.
+func (h *Hub) SetPipeline(pipeline *Pipeline) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pipeline = pipeline
+}
+
+// Start initializes the fan-out Hub. NATS subscriptions are dynamically managed per group.
+func (*Hub) Start(_ context.Context) error {
+	return nil
+}
+
+// Stop unsubscribes from all active NATS group subjects.
+func (h *Hub) Stop() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for groupID, subs := range h.groupSubs {
+		for _, sub := range subs {
+			_ = sub.Unsubscribe()
+		}
+		delete(h.groupSubs, groupID)
+	}
+}
+
+// OnGroupActive dynamically subscribes to Core NATS subjects for the active group.
+func (h *Hub) OnGroupActive(groupID string) error {
 	if h.conn == nil {
 		return nil
+	}
+	if groupID == "" {
+		groupID = defaultGroupID
 	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if _, exists := h.groupSubs[groupID]; exists {
+		return nil
+	}
 
 	handler := func(m *natsio.Msg) {
 		h.routeMessage(m)
 	}
 
-	// 1 shared subscription per subject namespace for the entire replica
 	subjects := []string{
-		fmt.Sprintf("%s.*.evt.>", h.stream),           // BOARD.*.evt.>
-		fmt.Sprintf("%s.*.audit.edited", h.stream),    // BOARD.*.audit.edited
-		fmt.Sprintf("%s.*.counter.replied", h.stream), // BOARD.*.counter.replied
+		fmt.Sprintf("%s.%s.evt.>", h.stream, groupID),
+		fmt.Sprintf("%s.%s.audit.edited", h.stream, groupID),
+		fmt.Sprintf("%s.%s.counter.replied", h.stream, groupID),
 	}
 
+	subs := make([]*natsio.Subscription, 0, len(subjects))
 	for _, subj := range subjects {
 		sub, err := h.conn.Subscribe(subj, handler)
 		if err != nil {
-			for _, done := range h.subs {
+			for _, done := range subs {
 				_ = done.Unsubscribe()
 			}
-			h.subs = nil
-			return fmt.Errorf("subscribe to %s: %w", subj, err)
+			return fmt.Errorf("subscribe to group %s on %s: %w", groupID, subj, err)
 		}
-		h.subs = append(h.subs, sub)
+		subs = append(subs, sub)
 	}
 
-	log.Info().Int("subscriptions", len(h.subs)).Msg("fan-out hub started with shared NATS consumers")
+	h.groupSubs[groupID] = subs
+	log.Debug().Str("group_id", groupID).Int("subscriptions", len(subs)).Msg("subscribed to group subjects on NATS")
 	return nil
 }
 
-// Stop unsubscribes from NATS subjects.
-func (h *Hub) Stop() {
+// OnGroupInactive unsubscribes from Core NATS subjects for the inactive group.
+func (h *Hub) OnGroupInactive(groupID string) {
+	if groupID == "" {
+		groupID = defaultGroupID
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for _, sub := range h.subs {
+	subs, exists := h.groupSubs[groupID]
+	if !exists {
+		return
+	}
+
+	for _, sub := range subs {
 		_ = sub.Unsubscribe()
 	}
-	h.subs = nil
+	delete(h.groupSubs, groupID)
+	log.Debug().Str("group_id", groupID).Msg("unsubscribed from group subjects on NATS")
+}
+
+// ActiveGroups returns a list of currently subscribed group IDs.
+func (h *Hub) ActiveGroups() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	groups := make([]string, 0, len(h.groupSubs))
+	for g := range h.groupSubs {
+		groups = append(groups, g)
+	}
+	return groups
 }
 
 // routeMessage extracts group_id and root_id from incoming event payload and broadcasts to the pipeline.

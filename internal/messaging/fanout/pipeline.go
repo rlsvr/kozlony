@@ -55,6 +55,13 @@ type pipelineRequest struct {
 	done      chan struct{}
 }
 
+// GroupSubscriptionListener notifies external brokers (such as Core NATS)
+// when a group transitions between having active subscribers and having none.
+type GroupSubscriptionListener interface {
+	OnGroupActive(groupID string) error
+	OnGroupInactive(groupID string)
+}
+
 // Pipeline manages active SSE connection groupings asynchronously using the actor pattern
 // and atomic copy-on-write snapshots, eliminating lock contention under high concurrency.
 type Pipeline struct {
@@ -64,10 +71,22 @@ type Pipeline struct {
 	current       atomic.Pointer[Snapshot]
 	batchInterval time.Duration
 	batchSize     int
+	groupCounts   map[string]int
+	listener      GroupSubscriptionListener
+}
+
+// Option configures Pipeline behavior.
+type Option func(*Pipeline)
+
+// WithGroupListener sets the GroupSubscriptionListener for dynamic group lifecycle callbacks.
+func WithGroupListener(l GroupSubscriptionListener) Option {
+	return func(p *Pipeline) {
+		p.listener = l
+	}
 }
 
 // NewPipeline creates and starts a new fan-out Pipeline.
-func NewPipeline(ctx context.Context, batchInterval time.Duration, batchSize int) *Pipeline {
+func NewPipeline(ctx context.Context, batchInterval time.Duration, batchSize int, opts ...Option) *Pipeline {
 	if batchInterval <= 0 {
 		batchInterval = 5 * time.Millisecond
 	}
@@ -82,6 +101,10 @@ func NewPipeline(ctx context.Context, batchInterval time.Duration, batchSize int
 		requests:      make(chan pipelineRequest, 2048),
 		batchInterval: batchInterval,
 		batchSize:     batchSize,
+		groupCounts:   make(map[string]int),
+	}
+	for _, opt := range opts {
+		opt(p)
 	}
 	p.current.Store(newEmptySnapshot())
 	go p.run()
@@ -224,9 +247,27 @@ func (p *Pipeline) applyBatch(batch []pipelineRequest) {
 	for _, req := range batch {
 		switch req.op {
 		case opRegister:
+			if c := req.client; c != nil {
+				prevCount := p.groupCounts[c.GroupID]
+				p.groupCounts[c.GroupID] = prevCount + 1
+				if prevCount == 0 && p.listener != nil {
+					_ = p.listener.OnGroupActive(c.GroupID)
+				}
+			}
 			addClientToSnapshot(next, req.client)
 		case opRemove:
 			removeClientFromSnapshot(next, req.client)
+			if c := req.client; c != nil {
+				prevCount := p.groupCounts[c.GroupID]
+				if prevCount <= 1 {
+					delete(p.groupCounts, c.GroupID)
+					if prevCount == 1 && p.listener != nil {
+						p.listener.OnGroupInactive(c.GroupID)
+					}
+				} else {
+					p.groupCounts[c.GroupID] = prevCount - 1
+				}
+			}
 		case opSwitch:
 			removeClientFromSnapshot(next, req.client)
 			req.client.RootID = req.newRootID

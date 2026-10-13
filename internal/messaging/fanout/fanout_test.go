@@ -186,3 +186,68 @@ func TestFanoutViewEpochRejectsStaleEvents(t *testing.T) {
 		t.Fatal("expected client to receive event for new view")
 	}
 }
+
+type mockGroupListener struct {
+	active   []string
+	inactive []string
+}
+
+func (m *mockGroupListener) OnGroupActive(groupID string) error {
+	m.active = append(m.active, groupID)
+	return nil
+}
+
+func (m *mockGroupListener) OnGroupInactive(groupID string) {
+	m.inactive = append(m.inactive, groupID)
+}
+
+func TestFanoutGroupSubscriptionListener(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	listener := &mockGroupListener{}
+	p := fanout.NewPipeline(ctx, 1*time.Millisecond, 10, fanout.WithGroupListener(listener))
+	defer p.Stop()
+
+	// 1. Add first client to group "g1" -> should trigger OnGroupActive("g1")
+	c1 := fanout.NewClient("c1", "g1", nil, 10)
+	p.RegisterAndWait(c1)
+
+	if len(listener.active) != 1 || listener.active[0] != "g1" {
+		t.Fatalf("expected OnGroupActive for g1, got: %v", listener.active)
+	}
+
+	// 2. Add second client to group "g1" -> should NOT trigger OnGroupActive again
+	c2 := fanout.NewClient("c2", "g1", nil, 10)
+	p.RegisterAndWait(c2)
+
+	if len(listener.active) != 1 {
+		t.Fatalf("expected still only 1 OnGroupActive call, got: %v", listener.active)
+	}
+
+	// 3. Add client to group "g2" -> should trigger OnGroupActive("g2")
+	c3 := fanout.NewClient("c3", "g2", nil, 10)
+	p.RegisterAndWait(c3)
+
+	if len(listener.active) != 2 || listener.active[1] != "g2" {
+		t.Fatalf("expected OnGroupActive for g2, got: %v", listener.active)
+	}
+
+	// 4. Remove one client from "g1" (c1) -> should NOT trigger OnGroupInactive yet
+	p.RemoveAndWait(c1)
+	if len(listener.inactive) != 0 {
+		t.Fatalf("expected no OnGroupInactive calls, got: %v", listener.inactive)
+	}
+
+	// 5. Remove last client from "g1" (c2) -> should trigger OnGroupInactive("g1")
+	p.RemoveAndWait(c2)
+	if len(listener.inactive) != 1 || listener.inactive[0] != "g1" {
+		t.Fatalf("expected OnGroupInactive for g1, got: %v", listener.inactive)
+	}
+
+	// 6. Remove last client from "g2" (c3) -> should trigger OnGroupInactive("g2")
+	p.RemoveAndWait(c3)
+	if len(listener.inactive) != 2 || listener.inactive[1] != "g2" {
+		t.Fatalf("expected OnGroupInactive for g2, got: %v", listener.inactive)
+	}
+}

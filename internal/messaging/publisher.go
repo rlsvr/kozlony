@@ -33,10 +33,17 @@ func NewPublisher(client *Client) *Publisher {
 	}
 
 	if client != nil && client.conn != nil && client.conn.Raw() != nil {
-		p.fanoutPipeline = fanout.NewPipeline(context.Background(), 5*time.Millisecond, 128)
-		p.fanoutHub = fanout.NewHub(p.fanoutPipeline, client.conn.Raw(), client.cfg.NATSStreamName)
+		hub := fanout.NewHub(nil, client.conn.Raw(), client.cfg.NATSStreamName)
+		p.fanoutPipeline = fanout.NewPipeline(
+			context.Background(),
+			5*time.Millisecond,
+			128,
+			fanout.WithGroupListener(hub),
+		)
+		p.fanoutHub = hub
+		hub.SetPipeline(p.fanoutPipeline)
 		if err := p.fanoutHub.Start(context.Background()); err != nil {
-			log.Warn().Err(err).Msg("failed to start shared fan-out hub")
+			log.Warn().Err(err).Msg("failed to start fan-out hub")
 		}
 	}
 

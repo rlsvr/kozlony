@@ -76,6 +76,14 @@ func SubjectAllAuditEvents(stream string) string {
 	return fmt.Sprintf("%s.*.%s", stream, EventEditedSuffix)
 }
 
+// SubjectGroupEvents returns the wildcard subject matching all events for one group.
+func SubjectGroupEvents(stream, groupID string) string {
+	if groupID == "" {
+		groupID = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s.evt.>", stream, groupID)
+}
+
 // SubjectGroupAuditEvents returns the wildcard subject matching edit notifications for one
 // group.
 func SubjectGroupAuditEvents(stream, groupID string) string {
@@ -91,6 +99,11 @@ func SubjectReplyCountsRecalculated(stream, groupID string) string {
 		groupID = DefaultGroupID
 	}
 	return fmt.Sprintf("%s.%s.%s", stream, groupID, EventReplyCountsSuffix)
+}
+
+// SubjectGroupReplyCounts returns the subject matching reply counts for one group.
+func SubjectGroupReplyCounts(stream, groupID string) string {
+	return SubjectReplyCountsRecalculated(stream, groupID)
 }
 
 // SubjectAllReplyCounts returns the wildcard subject matching every reply count

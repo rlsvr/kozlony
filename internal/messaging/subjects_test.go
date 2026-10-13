@@ -64,9 +64,19 @@ func TestSubjectGenerators(t *testing.T) {
 			expected: "BOARD.*.audit.edited",
 		},
 		{
+			name:     "SubjectGroupEvents",
+			got:      messaging.SubjectGroupEvents("BOARD", "dev"),
+			expected: "BOARD.dev.evt.>",
+		},
+		{
 			name:     "SubjectGroupAuditEvents",
 			got:      messaging.SubjectGroupAuditEvents("BOARD", "dev"),
 			expected: "BOARD.dev.audit.edited",
+		},
+		{
+			name:     "SubjectGroupReplyCounts",
+			got:      messaging.SubjectGroupReplyCounts("BOARD", "dev"),
+			expected: "BOARD.dev.counter.replied",
 		},
 		{
 			name:     "SubjectAllReplyCounts",
