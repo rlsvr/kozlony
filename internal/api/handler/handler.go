@@ -502,6 +502,23 @@ func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInter
 			if _, err := fmt.Fprintf(ctx.Response(), "data: %s\n\n", msg); err != nil {
 				return nil
 			}
+
+			// Micro-drain: write all currently buffered events before issuing a single TCP flush syscall
+		DRAIN:
+			for {
+				select {
+				case nextMsg, ok := <-msgChan:
+					if !ok {
+						return nil
+					}
+					if _, err := fmt.Fprintf(ctx.Response(), "data: %s\n\n", nextMsg); err != nil {
+						return nil
+					}
+				default:
+					break DRAIN
+				}
+			}
+
 			ctx.Response().Flush()
 		}
 	}

@@ -8,7 +8,89 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// PartitionedDrainerConsumer embeds *Client and manages N durable pull consumers, one per partition.
+type PartitionedDrainerConsumer struct {
+	*Client
+	consumers []jetstream.Consumer
+}
+
+// NewPartitionedDrainerConsumer creates or updates durable pull consumers for each ingestion partition.
+func NewPartitionedDrainerConsumer(ctx context.Context, client *Client, numPartitions int) (*PartitionedDrainerConsumer, error) {
+	if client == nil {
+		return nil, errors.New("client cannot be nil")
+	}
+	if numPartitions <= 0 {
+		numPartitions = client.cfg.IngestPartitions
+		if numPartitions <= 0 {
+			numPartitions = DefaultIngestPartitions
+		}
+	}
+
+	stream, err := client.Raw().Stream(ctx, client.cfg.NATSStreamName)
+	if err != nil {
+		return nil, fmt.Errorf("get stream: %w", err)
+	}
+
+	maxAckPending := client.cfg.NATSConcurrentSubscribers * client.cfg.DrainBatchSize * 2
+	if maxAckPending < 20000 {
+		maxAckPending = 20000
+	}
+	maxAckPendingPerPart := maxAckPending / numPartitions
+	if maxAckPendingPerPart < 2000 {
+		maxAckPendingPerPart = 2000
+	}
+
+	consumers := make([]jetstream.Consumer, numPartitions)
+	for p := 0; p < numPartitions; p++ {
+		consumerCfg := jetstream.ConsumerConfig{
+			Durable:       fmt.Sprintf("%s-%d", client.cfg.NATSConsumerName, p),
+			FilterSubject: SubjectIngestPartition(p),
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckWait:       client.cfg.NATSAckWait,
+			MaxAckPending: maxAckPendingPerPart,
+		}
+
+		cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create or update partition %d consumer: %w", p, err)
+		}
+		consumers[p] = cons
+	}
+
+	return &PartitionedDrainerConsumer{
+		Client:    client,
+		consumers: consumers,
+	}, nil
+}
+
+// FetchPartition fetches a micro-batch of messages from the consumer for the given partition.
+func (pdc *PartitionedDrainerConsumer) FetchPartition(partition int, batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+	if pdc == nil || len(pdc.consumers) == 0 {
+		return nil, errors.New("partitioned drainer consumer not initialized")
+	}
+	p := partition % len(pdc.consumers)
+	if p < 0 {
+		p += len(pdc.consumers)
+	}
+	return pdc.consumers[p].Fetch(batch, opts...)
+}
+
+// Fetch satisfies the BatchFetcher interface by fetching from partition 0.
+func (pdc *PartitionedDrainerConsumer) Fetch(batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+	return pdc.FetchPartition(0, batch, opts...)
+}
+
+// Partitions returns the number of active partition consumers.
+func (pdc *PartitionedDrainerConsumer) Partitions() int {
+	if pdc == nil {
+		return 0
+	}
+	return len(pdc.consumers)
+}
+
 // DrainerConsumer embeds *Client and manages the JetStream pull consumer for micro-batch ingestion.
+// Deprecated: use PartitionedDrainerConsumer for high-throughput partitioned ingestion.
 type DrainerConsumer struct {
 	*Client
 	consumer jetstream.Consumer
@@ -32,7 +114,7 @@ func NewDrainerConsumer(ctx context.Context, client *Client) (*DrainerConsumer, 
 
 	consumerCfg := jetstream.ConsumerConfig{
 		Durable:       client.cfg.NATSConsumerName,
-		FilterSubject: SubjectAllEvents(client.cfg.NATSStreamName),
+		FilterSubject: SubjectIngestFilter(),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckWait:       client.cfg.NATSAckWait,

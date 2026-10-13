@@ -79,11 +79,16 @@ func (c *Client) Init(ctx context.Context) error {
 // EnsureStream idempotently creates or updates the configured JetStream stream with sliding retention.
 func (c *Client) EnsureStream(ctx context.Context) error {
 	streamCfg := jetstream.StreamConfig{
-		Name:      c.cfg.NATSStreamName,
-		Subjects:  []string{SubjectStreamFilter(c.cfg.NATSStreamName)},
+		Name: c.cfg.NATSStreamName,
+		Subjects: []string{
+			SubjectStreamFilter(c.cfg.NATSStreamName),
+			SubjectIngestFilter(),
+		},
 		Retention: jetstream.LimitsPolicy,
 		Storage:   jetstream.FileStorage,
 		MaxAge:    c.cfg.NATSStreamRetention,
+		MaxBytes:  10 * 1024 * 1024 * 1024, // 10 GB sliding buffer cap
+		Discard:   jetstream.DiscardOld,
 	}
 
 	_, err := c.Raw().CreateOrUpdateStream(ctx, streamCfg)

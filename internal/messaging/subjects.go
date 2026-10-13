@@ -1,7 +1,10 @@
 // Package messaging provides NATS JetStream communication and message routing.
 package messaging
 
-import "fmt"
+import (
+	"fmt"
+	"hash/fnv"
+)
 
 const (
 	// DefaultStreamName is the default JetStream stream name.
@@ -10,26 +13,67 @@ const (
 	// DefaultGroupID is the default partition group identifier.
 	DefaultGroupID = "root"
 
+	// DefaultLivePrefix is the default subject prefix for ephemeral Core NATS fanout.
+	DefaultLivePrefix = "LIVE"
+
+	// DefaultIngestPartitions is the default number of ingestion partitions.
+	DefaultIngestPartitions = 16
+
 	// EventCreatedSuffix is the subject suffix for created events.
 	EventCreatedSuffix = "evt.created"
 
 	// EventEditedSuffix is the subject suffix for edit notifications.
-	//
-	// It sits deliberately outside the "evt." namespace because an edit is NOT a write
-	// command: the handler has already committed the edit to PostgreSQL synchronously
-	// before publishing this. The event exists only to fan the change out to SSE clients,
-	// so it must never match the drainer's filter (BOARD.<group>.evt.>), which would
-	// otherwise try to insert an edit notification as if it were an interaction.
 	EventEditedSuffix = "audit.edited"
 
 	// CommandCreateSuffix is the subject suffix for create commands.
 	CommandCreateSuffix = "cmd.create"
 
 	// EventReplyCountsSuffix is the subject suffix for recalculated reply counts.
-	// It is deliberately outside the "evt." namespace so the drainer (which
-	// consumes BOARD.<group>.evt.>) never consumes its own derived output.
 	EventReplyCountsSuffix = "counter.replied"
 )
+
+// SubjectIngestPartition returns the JetStream subject for an ingestion partition.
+func SubjectIngestPartition(partition int) string {
+	return fmt.Sprintf("INGEST.p.%d", partition)
+}
+
+// SubjectIngestFilter returns the wildcard capturing all ingest partitions.
+func SubjectIngestFilter() string {
+	return "INGEST.p.*"
+}
+
+// SubjectLiveFeed returns the ephemeral Core NATS topic for board feed events.
+func SubjectLiveFeed(prefix, groupID string) string {
+	if prefix == "" {
+		prefix = DefaultLivePrefix
+	}
+	if groupID == "" {
+		groupID = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s.feed", prefix, groupID)
+}
+
+// SubjectLiveThread returns the ephemeral Core NATS topic for a specific thread's events.
+func SubjectLiveThread(prefix, groupID, threadRootID string) string {
+	if prefix == "" {
+		prefix = DefaultLivePrefix
+	}
+	if groupID == "" {
+		groupID = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s.thread.%s", prefix, groupID, threadRootID)
+}
+
+// PartitionForThread deterministically computes the partition index for an interaction.
+func PartitionForThread(threadRootID string, numPartitions int) int {
+	if numPartitions <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(threadRootID))
+	//nolint:gosec // numPartitions is validated > 1 and fits in uint32
+	return int(h.Sum32() % uint32(numPartitions))
+}
 
 // SubjectInteractionCreated returns the subject for an interaction created event.
 func SubjectInteractionCreated(stream, groupID string) string {

@@ -6,6 +6,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultClientBufferSize is the default event channel capacity per subscriber,
+// sized to absorb mobile network jitter, cellular handovers, and latency spikes.
+const (
+	DefaultClientBufferSize = 512
+	DefaultGroupID          = "root"
+)
+
 // Client represents an individual active SSE connection subscriber.
 type Client struct {
 	ID      string
@@ -19,10 +26,10 @@ type Client struct {
 // NewClient creates a new Client subscriber with a buffered event channel.
 func NewClient(id, groupID string, rootID *uuid.UUID, bufSize int) *Client {
 	if bufSize <= 0 {
-		bufSize = 256
+		bufSize = DefaultClientBufferSize
 	}
 	if groupID == "" {
-		groupID = "root"
+		groupID = DefaultGroupID
 	}
 	c := &Client{
 		ID:      id,
@@ -32,6 +39,15 @@ func NewClient(id, groupID string, rootID *uuid.UUID, bufSize int) *Client {
 	}
 	c.epoch.Store(1)
 	return c
+}
+
+// TargetGroupID returns the effective routing group key:
+// either rootID string if focused on a thread, or GroupID for the board feed.
+func (c *Client) TargetGroupID() string {
+	if c.RootID != nil {
+		return c.RootID.String()
+	}
+	return c.GroupID
 }
 
 // Epoch returns the current view epoch generation of the client.
@@ -80,9 +96,11 @@ func (c *Client) Drain() {
 	}
 }
 
-// Close marks the client closed and drains/closes its channel safely.
+// Close marks the client closed so no further events are sent to it.
+// Note: We intentionally do NOT call close(c.Events) here because in lock-free
+// copy-on-write architectures, concurrent dispatchDirect workers may hold a reference
+// to this client in an in-flight snapshot. The channel and client will be safely
+// garbage collected once the HTTP SSE consumer and snapshot references are dropped.
 func (c *Client) Close() {
-	if c.closed.CompareAndSwap(false, true) {
-		close(c.Events)
-	}
+	c.closed.Store(true)
 }

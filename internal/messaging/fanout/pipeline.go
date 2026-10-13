@@ -3,43 +3,28 @@ package fanout
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	natsio "github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 // Snapshot represents an immutable copy-on-write view of active SSE subscriber groupings.
 // Broadcast operations load this snapshot with atomic.Pointer without any mutex locking.
 type Snapshot struct {
-	// feedClients: groupID -> clientID -> *Client (clients subscribed to the entire board feed)
-	feedClients map[string]map[string]*Client
-
-	// feedEpochs: groupID -> clientID -> epoch at registration/switch
-	feedEpochs map[string]map[string]uint64
-
-	// threadClients: "groupID:rootID" -> clientID -> *Client (clients subscribed to a specific conversation)
-	threadClients map[string]map[string]*Client
-
-	// threadEpochs: "groupID:rootID" -> clientID -> epoch at registration/switch
-	threadEpochs map[string]map[string]uint64
-
-	// totalClients count
+	// groups maps targetKey (either board name like "root" or thread UUID string) to its clients.
+	groups       map[string]map[string]*Client
 	totalClients int
 }
 
 func newEmptySnapshot() *Snapshot {
 	return &Snapshot{
-		feedClients:   make(map[string]map[string]*Client),
-		feedEpochs:    make(map[string]map[string]uint64),
-		threadClients: make(map[string]map[string]*Client),
-		threadEpochs:  make(map[string]map[string]uint64),
-		totalClients:  0,
+		groups:       make(map[string]map[string]*Client),
+		totalClients: 0,
 	}
-}
-
-func threadKey(groupID string, rootID uuid.UUID) string {
-	return fmt.Sprintf("%s:%s", groupID, rootID.String())
 }
 
 const (
@@ -51,44 +36,70 @@ const (
 type pipelineRequest struct {
 	op        string
 	client    *Client
-	newRootID *uuid.UUID // for "switch"
+	newRootID *uuid.UUID
 	done      chan struct{}
 }
 
-// GroupSubscriptionListener notifies external brokers (such as Core NATS)
-// when a group transitions between having active subscribers and having none.
+// GroupSubscriptionListener notifies external components when a group transitions
+// between having active subscribers and having none.
 type GroupSubscriptionListener interface {
 	OnGroupActive(groupID string) error
 	OnGroupInactive(groupID string)
 }
 
 // Pipeline manages active SSE connection groupings asynchronously using the actor pattern
-// and atomic copy-on-write snapshots, eliminating lock contention under high concurrency.
+// and per-topic Core NATS subscriptions with zero application-layer payload filtering.
 type Pipeline struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
-	requests      chan pipelineRequest
+	done          chan struct{}
 	current       atomic.Pointer[Snapshot]
+	requests      chan pipelineRequest
 	batchInterval time.Duration
 	batchSize     int
-	groupCounts   map[string]int
-	listener      GroupSubscriptionListener
+
+	// Core NATS dynamic subscriptions per active topic
+	conn        *natsio.Conn
+	livePrefix  string
+	subMu       sync.Mutex
+	topicCounts map[string]int
+	topicSubs   map[string]*natsio.Subscription
+	listener    GroupSubscriptionListener
 }
 
 // Option configures Pipeline behavior.
 type Option func(*Pipeline)
 
-// WithGroupListener sets the GroupSubscriptionListener for dynamic group lifecycle callbacks.
+// WithGroupListener sets an optional external GroupSubscriptionListener.
 func WithGroupListener(l GroupSubscriptionListener) Option {
 	return func(p *Pipeline) {
 		p.listener = l
 	}
 }
 
-// NewPipeline creates and starts a new fan-out Pipeline.
+// WithNATSConn attaches a raw Core NATS connection and live subject prefix.
+func WithNATSConn(conn *natsio.Conn, livePrefix string) Option {
+	return func(p *Pipeline) {
+		p.conn = conn
+		if livePrefix != "" {
+			p.livePrefix = livePrefix
+		}
+	}
+}
+
+// WithLivePrefix sets the live subject prefix.
+func WithLivePrefix(prefix string) Option {
+	return func(p *Pipeline) {
+		if prefix != "" {
+			p.livePrefix = prefix
+		}
+	}
+}
+
+// NewPipeline creates and starts a new fan-out Pipeline with per-topic Core NATS subscriptions.
 func NewPipeline(ctx context.Context, batchInterval time.Duration, batchSize int, opts ...Option) *Pipeline {
 	if batchInterval <= 0 {
-		batchInterval = 5 * time.Millisecond
+		batchInterval = 15 * time.Millisecond
 	}
 	if batchSize <= 0 {
 		batchSize = 128
@@ -98,42 +109,57 @@ func NewPipeline(ctx context.Context, batchInterval time.Duration, batchSize int
 	p := &Pipeline{
 		ctx:           pipelineCtx,
 		cancel:        cancel,
+		done:          make(chan struct{}),
 		requests:      make(chan pipelineRequest, 2048),
 		batchInterval: batchInterval,
 		batchSize:     batchSize,
-		groupCounts:   make(map[string]int),
+		livePrefix:    "LIVE",
+		topicCounts:   make(map[string]int),
+		topicSubs:     make(map[string]*natsio.Subscription),
 	}
+
 	for _, opt := range opts {
 		opt(p)
 	}
+
 	p.current.Store(newEmptySnapshot())
-	go p.run()
+	go p.runBatchActor()
+
 	return p
 }
 
-// Stop shuts down the pipeline actor loop.
+// Stop shuts down NATS topic subscriptions and the actor loop cleanly.
 func (p *Pipeline) Stop() {
 	p.cancel()
+
+	p.subMu.Lock()
+	for topic, s := range p.topicSubs {
+		_ = s.Unsubscribe()
+		delete(p.topicSubs, topic)
+	}
+	p.subMu.Unlock()
+
+	<-p.done
 }
 
-// Register adds a client subscriber.
+// Register adds a client subscriber asynchronously.
 func (p *Pipeline) Register(client *Client) {
 	p.requests <- pipelineRequest{op: opRegister, client: client}
 }
 
-// RegisterAndWait adds a client subscriber and blocks until it is incorporated into the snapshot.
+// RegisterAndWait adds a client subscriber and blocks until incorporated into the snapshot.
 func (p *Pipeline) RegisterAndWait(client *Client) {
 	done := make(chan struct{})
 	p.requests <- pipelineRequest{op: opRegister, client: client, done: done}
 	<-done
 }
 
-// Remove unregisters a client subscriber.
+// Remove unregisters a client subscriber asynchronously.
 func (p *Pipeline) Remove(client *Client) {
 	p.requests <- pipelineRequest{op: opRemove, client: client}
 }
 
-// RemoveAndWait unregisters a client subscriber and blocks until it is removed from the snapshot.
+// RemoveAndWait unregisters a client subscriber and blocks until removed from the snapshot.
 func (p *Pipeline) RemoveAndWait(client *Client) {
 	done := make(chan struct{})
 	p.requests <- pipelineRequest{op: opRemove, client: client, done: done}
@@ -141,7 +167,7 @@ func (p *Pipeline) RemoveAndWait(client *Client) {
 }
 
 // Switch updates a client's subscription focus (e.g. from feed to thread, or between threads).
-// It increments the client's view epoch to immediately reject stale messages.
+// It atomically increments the client's view epoch to drop any in-flight stale messages.
 func (p *Pipeline) Switch(client *Client, newRootID *uuid.UUID) {
 	client.BumpEpoch()
 	p.requests <- pipelineRequest{op: opSwitch, client: client, newRootID: newRootID}
@@ -164,51 +190,60 @@ func (p *Pipeline) Current() *Snapshot {
 
 // TotalClients returns the current total number of active subscribers.
 func (p *Pipeline) TotalClients() int {
-	return p.current.Load().totalClients
+	snap := p.current.Load()
+	if snap == nil {
+		return 0
+	}
+	return snap.totalClients
 }
 
-// Broadcast distributes an event payload to all matching clients lock-free.
-// If rootID is nil, message is delivered to all feed subscribers of groupID.
-// If rootID is specified, message is delivered to both feed subscribers of groupID
-// and specific thread subscribers for that rootID.
-// Stale messages targeted at a client that switched views are discarded via epoch check.
+// Broadcast distributes a payload to subscribers (used in tests and internal calls).
 func (p *Pipeline) Broadcast(groupID string, rootID *uuid.UUID, data []byte) int {
+	delivered := 0
+	if rootID != nil {
+		delivered += p.dispatchTopic(rootID.String(), data)
+	}
+	delivered += p.dispatchTopic(groupID, data)
+	return delivered
+}
+
+// dispatchTopic distributes raw payload bytes to all clients on a target key.
+// Zero JSON decoding: delivers raw bytes directly to client channels.
+func (p *Pipeline) dispatchTopic(targetKey string, data []byte) int {
 	snap := p.current.Load()
-	if snap.totalClients == 0 {
+	if snap == nil || snap.totalClients == 0 {
+		return 0
+	}
+
+	clients := snap.groups[targetKey]
+	if len(clients) == 0 {
 		return 0
 	}
 
 	delivered := 0
-
-	// 1. Deliver to feed subscribers of this group
-	if feeds, ok := snap.feedClients[groupID]; ok {
-		epochs := snap.feedEpochs[groupID]
-		for id, client := range feeds {
-			expEpoch := epochs[id]
-			if client.SendWithEpoch(data, expEpoch) {
-				delivered++
-			}
+	for _, c := range clients {
+		if c.Send(data) {
+			delivered++
 		}
 	}
-
-	// 2. Deliver to specific thread subscribers if rootID is present
-	if rootID != nil {
-		key := threadKey(groupID, *rootID)
-		if threads, ok := snap.threadClients[key]; ok {
-			epochs := snap.threadEpochs[key]
-			for id, client := range threads {
-				expEpoch := epochs[id]
-				if client.SendWithEpoch(data, expEpoch) {
-					delivered++
-				}
-			}
-		}
-	}
-
 	return delivered
 }
 
-func (p *Pipeline) run() {
+func (p *Pipeline) topicForClient(c *Client) (string, string) {
+	prefix := p.livePrefix
+	if prefix == "" {
+		prefix = "LIVE"
+	}
+	targetKey := c.TargetGroupID()
+	if c.RootID != nil {
+		return fmt.Sprintf("%s.%s.thread.%s", prefix, c.GroupID, c.RootID.String()), targetKey
+	}
+	return fmt.Sprintf("%s.%s.feed", prefix, c.GroupID), targetKey
+}
+
+func (p *Pipeline) runBatchActor() {
+	defer close(p.done)
+
 	batch := make([]pipelineRequest, 0, p.batchSize)
 	timer := time.NewTimer(p.batchInterval)
 	defer timer.Stop()
@@ -242,184 +277,140 @@ func (p *Pipeline) run() {
 
 func (p *Pipeline) applyBatch(batch []pipelineRequest) {
 	current := p.current.Load()
-	next := copySnapshot(current)
+
+	nextGroups := make(map[string]map[string]*Client, len(current.groups)+len(batch))
+	for gID, clients := range current.groups {
+		nextGroups[gID] = clients
+	}
+
+	cloned := make(map[string]bool)
+
+	cloneGroupIfNeeded := func(gID string) {
+		if cloned[gID] {
+			if nextGroups[gID] == nil {
+				nextGroups[gID] = make(map[string]*Client, 4)
+			}
+			return
+		}
+		orig := nextGroups[gID]
+		if orig == nil {
+			nextGroups[gID] = make(map[string]*Client, 4)
+			cloned[gID] = true
+			return
+		}
+		groupCopy := make(map[string]*Client, len(orig)+1)
+		for id, c := range orig {
+			groupCopy[id] = c
+		}
+		nextGroups[gID] = groupCopy
+		cloned[gID] = true
+	}
 
 	for _, req := range batch {
+		c := req.client
+		if c == nil {
+			if req.done != nil {
+				close(req.done)
+			}
+			continue
+		}
+
 		switch req.op {
 		case opRegister:
-			if c := req.client; c != nil {
-				prevCount := p.groupCounts[c.GroupID]
-				p.groupCounts[c.GroupID] = prevCount + 1
-				if prevCount == 0 && p.listener != nil {
-					_ = p.listener.OnGroupActive(c.GroupID)
-				}
-			}
-			addClientToSnapshot(next, req.client)
+			topic, targetKey := p.topicForClient(c)
+			cloneGroupIfNeeded(targetKey)
+			nextGroups[targetKey][c.ID] = c
+			p.incrTopicCount(topic, targetKey)
+
 		case opRemove:
-			removeClientFromSnapshot(next, req.client)
-			if c := req.client; c != nil {
-				prevCount := p.groupCounts[c.GroupID]
-				if prevCount <= 1 {
-					delete(p.groupCounts, c.GroupID)
-					if prevCount == 1 && p.listener != nil {
-						p.listener.OnGroupInactive(c.GroupID)
-					}
-				} else {
-					p.groupCounts[c.GroupID] = prevCount - 1
-				}
+			topic, targetKey := p.topicForClient(c)
+			cloneGroupIfNeeded(targetKey)
+			delete(nextGroups[targetKey], c.ID)
+			if len(nextGroups[targetKey]) == 0 {
+				delete(nextGroups, targetKey)
 			}
+			p.decrTopicCount(topic, targetKey)
+
 		case opSwitch:
-			removeClientFromSnapshot(next, req.client)
-			req.client.RootID = req.newRootID
-			addClientToSnapshot(next, req.client)
+			oldTopic, oldKey := p.topicForClient(c)
+			cloneGroupIfNeeded(oldKey)
+			delete(nextGroups[oldKey], c.ID)
+			if len(nextGroups[oldKey]) == 0 {
+				delete(nextGroups, oldKey)
+			}
+			p.decrTopicCount(oldTopic, oldKey)
+
+			c.RootID = req.newRootID
+			newTopic, newKey := p.topicForClient(c)
+			cloneGroupIfNeeded(newKey)
+			nextGroups[newKey][c.ID] = c
+			p.incrTopicCount(newTopic, newKey)
 		}
+
 		if req.done != nil {
 			close(req.done)
 		}
 	}
 
-	p.current.Store(next)
+	total := 0
+	for _, grp := range nextGroups {
+		total += len(grp)
+	}
+
+	p.current.Store(&Snapshot{
+		groups:       nextGroups,
+		totalClients: total,
+	})
 }
 
-func copySnapshot(src *Snapshot) *Snapshot {
-	dst := &Snapshot{
-		feedClients:   make(map[string]map[string]*Client, len(src.feedClients)),
-		feedEpochs:    make(map[string]map[string]uint64, len(src.feedEpochs)),
-		threadClients: make(map[string]map[string]*Client, len(src.threadClients)),
-		threadEpochs:  make(map[string]map[string]uint64, len(src.threadEpochs)),
-		totalClients:  src.totalClients,
-	}
+func (p *Pipeline) incrTopicCount(topic, targetKey string) {
+	p.subMu.Lock()
+	defer p.subMu.Unlock()
 
-	for groupID, clients := range src.feedClients {
-		groupCopy := make(map[string]*Client, len(clients))
-		for id, c := range clients {
-			groupCopy[id] = c
-		}
-		dst.feedClients[groupID] = groupCopy
-	}
-
-	for groupID, epochs := range src.feedEpochs {
-		epochCopy := make(map[string]uint64, len(epochs))
-		for id, ep := range epochs {
-			epochCopy[id] = ep
-		}
-		dst.feedEpochs[groupID] = epochCopy
-	}
-
-	for key, clients := range src.threadClients {
-		threadCopy := make(map[string]*Client, len(clients))
-		for id, c := range clients {
-			threadCopy[id] = c
-		}
-		dst.threadClients[key] = threadCopy
-	}
-
-	for key, epochs := range src.threadEpochs {
-		epochCopy := make(map[string]uint64, len(epochs))
-		for id, ep := range epochs {
-			epochCopy[id] = ep
-		}
-		dst.threadEpochs[key] = epochCopy
-	}
-
-	return dst
-}
-
-func addClientToSnapshot(snap *Snapshot, c *Client) {
-	if c == nil {
+	prev := p.topicCounts[topic]
+	p.topicCounts[topic] = prev + 1
+	if prev > 0 {
 		return
 	}
-	if c.RootID == nil {
-		addFeedClient(snap, c)
+
+	if p.listener != nil {
+		_ = p.listener.OnGroupActive(targetKey)
+	}
+	p.subscribeTopicLocked(topic, targetKey)
+}
+
+func (p *Pipeline) subscribeTopicLocked(topic, targetKey string) {
+	if p.conn == nil {
 		return
 	}
-	addThreadClient(snap, c)
-}
-
-func addFeedClient(snap *Snapshot, c *Client) {
-	group, ok := snap.feedClients[c.GroupID]
-	if !ok {
-		group = make(map[string]*Client)
-		snap.feedClients[c.GroupID] = group
-	}
-	epochs, ok := snap.feedEpochs[c.GroupID]
-	if !ok {
-		epochs = make(map[string]uint64)
-		snap.feedEpochs[c.GroupID] = epochs
-	}
-	if _, exists := group[c.ID]; !exists {
-		snap.totalClients++
-	}
-	group[c.ID] = c
-	epochs[c.ID] = c.Epoch()
-}
-
-func addThreadClient(snap *Snapshot, c *Client) {
-	key := threadKey(c.GroupID, *c.RootID)
-	group, ok := snap.threadClients[key]
-	if !ok {
-		group = make(map[string]*Client)
-		snap.threadClients[key] = group
-	}
-	epochs, ok := snap.threadEpochs[key]
-	if !ok {
-		epochs = make(map[string]uint64)
-		snap.threadEpochs[key] = epochs
-	}
-	if _, exists := group[c.ID]; !exists {
-		snap.totalClients++
-	}
-	group[c.ID] = c
-	epochs[c.ID] = c.Epoch()
-}
-
-func removeClientFromSnapshot(snap *Snapshot, c *Client) {
-	if c == nil {
+	key := targetKey
+	sub, err := p.conn.Subscribe(topic, func(m *natsio.Msg) {
+		p.dispatchTopic(key, m.Data)
+	})
+	if err != nil {
+		log.Error().Err(err).Str("topic", topic).Msg("failed to subscribe to live NATS topic")
 		return
 	}
-	removeFeedClient(snap, c)
-	if c.RootID != nil {
-		removeThreadClient(snap, c)
-	}
+	p.topicSubs[topic] = sub
+	log.Debug().Str("topic", topic).Msg("subscribed to live NATS topic")
 }
 
-func removeFeedClient(snap *Snapshot, c *Client) {
-	group, ok := snap.feedClients[c.GroupID]
-	if !ok {
-		return
-	}
-	if _, exists := group[c.ID]; exists {
-		delete(group, c.ID)
-		if epochs, ok := snap.feedEpochs[c.GroupID]; ok {
-			delete(epochs, c.ID)
-			if len(epochs) == 0 {
-				delete(snap.feedEpochs, c.GroupID)
-			}
-		}
-		snap.totalClients--
-		if len(group) == 0 {
-			delete(snap.feedClients, c.GroupID)
-		}
-	}
-}
+func (p *Pipeline) decrTopicCount(topic, targetKey string) {
+	p.subMu.Lock()
+	defer p.subMu.Unlock()
 
-func removeThreadClient(snap *Snapshot, c *Client) {
-	key := threadKey(c.GroupID, *c.RootID)
-	group, ok := snap.threadClients[key]
-	if !ok {
-		return
-	}
-	if _, exists := group[c.ID]; exists {
-		delete(group, c.ID)
-		if epochs, ok := snap.threadEpochs[key]; ok {
-			delete(epochs, c.ID)
-			if len(epochs) == 0 {
-				delete(snap.threadEpochs, key)
-			}
+	prev := p.topicCounts[topic]
+	if prev <= 1 {
+		delete(p.topicCounts, topic)
+		if sub, exists := p.topicSubs[topic]; exists {
+			_ = sub.Unsubscribe()
+			delete(p.topicSubs, topic)
+			log.Debug().Str("topic", topic).Msg("unsubscribed from live NATS topic")
 		}
-		snap.totalClients--
-		if len(group) == 0 {
-			delete(snap.threadClients, key)
+		if p.listener != nil {
+			p.listener.OnGroupInactive(targetKey)
 		}
+	} else {
+		p.topicCounts[topic] = prev - 1
 	}
 }

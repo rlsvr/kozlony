@@ -50,20 +50,39 @@ func main() {
 		Str("log_level", level.String()).
 		Msg("initializing services")
 
-	dbPool, err := database.ConnectWithLimits(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns)
+	writeMaxConns := cfg.DatabaseWriteMaxConns
+	if writeMaxConns <= 0 {
+		writeMaxConns = 30
+	}
+	readMaxConns := cfg.DatabaseReadMaxConns
+	if readMaxConns <= 0 {
+		readMaxConns = 20
+	}
+
+	writePool, err := database.ConnectWithLimits(ctx, cfg.DatabaseURL, writeMaxConns, 5)
 	if err != nil {
-		log.Warn().Err(err).Msg("failed to connect to PostgreSQL database (continuing without DB)")
+		log.Warn().Err(err).Msg("failed to connect to PostgreSQL write pool (continuing without DB)")
 	} else {
-		defer dbPool.Close()
+		defer writePool.Close()
 		log.Info().
-			Int("max_conns", cfg.DatabaseMaxConns).
-			Int("min_conns", cfg.DatabaseMinConns).
-			Msg("connected to PostgreSQL database pool")
+			Int("write_max_conns", writeMaxConns).
+			Msg("connected to PostgreSQL write pool (drainer + counter)")
+	}
+
+	readPool, err := database.ConnectWithLimits(ctx, cfg.DatabaseURL, readMaxConns, 5)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to connect to PostgreSQL read pool (falling back to write pool)")
+		readPool = writePool
+	} else {
+		defer readPool.Close()
+		log.Info().
+			Int("read_max_conns", readMaxConns).
+			Msg("connected to PostgreSQL read pool (HTTP API)")
 	}
 
 	var repo database.Repository
-	if dbPool != nil {
-		repo = database.NewInteractionRepository(dbPool)
+	if writePool != nil {
+		repo = database.NewInteractionRepositoryWithPools(writePool, readPool)
 	}
 
 	msgClient, err := messaging.Init(ctx, cfg)
@@ -83,7 +102,10 @@ func main() {
 	// The counter consumer applies recalculated reply counts in its own small transaction.
 	// It is stopped during shutdown before the database pool closes, so an in-flight
 	// ApplyReplyCounts can never race a closed pool.
-	var replyCounter *drainer.Counter
+	var (
+		replyCounter *drainer.Counter
+		batchDrainer *drainer.Drainer
+	)
 	if msgClient != nil && repo != nil {
 		counterConsumer, err := messaging.NewCounterConsumer(ctx, msgClient)
 		if err != nil {
@@ -93,15 +115,15 @@ func main() {
 			replyCounter.Start(ctx)
 		}
 
-		drainerConsumer, err := messaging.NewDrainerConsumer(ctx, msgClient)
+		drainerConsumer, err := messaging.NewPartitionedDrainerConsumer(ctx, msgClient, cfg.IngestPartitions)
 		if err != nil {
-			log.Warn().Err(err).Msg("failed to create JetStream drainer consumer")
+			log.Warn().Err(err).Msg("failed to create JetStream partitioned drainer consumer")
 		} else {
 			// drainer.StartWithCountPublisher constructs the Drainer and launches its
 			// worker loop in a background goroutine; do not also call Run here or the
 			// loop runs twice. The drainer publishes recalculated reply counts after
 			// each committed batch, keeping reply_count writes out of the insert path.
-			drainer.StartWithCountPublisher(ctx, drainerConsumer, repo, msgClient, msgPublisher, cfg)
+			batchDrainer = drainer.StartWithCountPublisher(ctx, drainerConsumer, repo, msgClient, msgPublisher, cfg)
 		}
 	}
 
@@ -122,14 +144,20 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// Stop the counter workers before the database pool is closed by the deferred
-	// dbPool.Close(), so an in-flight ApplyReplyCounts cannot race a closing pool.
+	// 1. Stop HTTP server first so no new incoming requests generate publisher messages.
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		log.Fatal().Err(err).Msg("server forced to shutdown")
+	}
+
+	// 2. Stop the drainer workers so in-flight InsertBatchWithCounts finishes cleanly before DB closes.
+	if batchDrainer != nil {
+		batchDrainer.Stop()
+	}
+
+	// 3. Stop the counter workers so in-flight ApplyReplyCounts finishes cleanly before DB closes.
 	if replyCounter != nil {
 		replyCounter.Stop()
 	}
 
-	if err := e.Shutdown(shutdownCtx); err != nil {
-		log.Fatal().Err(err).Msg("server forced to shutdown")
-	}
 	log.Info().Msg("server exited cleanly")
 }
