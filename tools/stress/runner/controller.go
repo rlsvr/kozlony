@@ -49,28 +49,31 @@ func NewPressureController(cfg Config, pool *InteractionPool, metrics *Metrics) 
 		limiter = rate.NewLimiter(rate.Limit(cfg.RPS), burst)
 	}
 
-	totalSockets := poolWorkers * 2
-	if cfg.WithClients > 0 {
-		totalSockets += cfg.WithClients * 2
-	}
-	if totalSockets < 200 {
-		totalSockets = 200
+	httpTransport := &http.Transport{
+		MaxIdleConns:        poolWorkers * 4,
+		MaxIdleConnsPerHost: poolWorkers * 4,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
 	}
 
-	transport := &http.Transport{
-		MaxIdleConns:        totalSockets,
-		MaxIdleConnsPerHost: totalSockets,
+	sseSockets := cfg.WithClients * 2
+	if sseSockets < 100 {
+		sseSockets = 100
+	}
+	sseTransport := &http.Transport{
+		MaxIdleConns:        sseSockets,
+		MaxIdleConnsPerHost: sseSockets,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
 	}
 
 	httpClient := &http.Client{
-		Transport: transport,
+		Transport: httpTransport,
 		Timeout:   10 * time.Second,
 	}
 
 	sseClient := &http.Client{
-		Transport: transport,
+		Transport: sseTransport,
 		Timeout:   0, // Streaming responses must not have a client-level timeout
 	}
 
@@ -146,6 +149,9 @@ func (c *PressureController) Run(ctx context.Context, out io.Writer) error {
 				defer sseWg.Done()
 				c.runSSEClient(runCtx, clientID)
 			}(i)
+			if c.cfg.WithClients >= 5000 && i%50 == 0 {
+				time.Sleep(1 * time.Millisecond) // smooth SYN arrival rate
+			}
 		}
 	}
 
@@ -549,8 +555,6 @@ func (c *PressureController) doRead(ctx context.Context, rng *rand.Rand) {
 }
 
 func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
-	reqURL := fmt.Sprintf("%s/v1/interactions/events?group_id=%s", c.cfg.TargetURL, c.cfg.GroupID)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -558,8 +562,34 @@ func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
 		default:
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		// Determine target stream URL (feed vs specific thread)
+		reqURL := fmt.Sprintf("%s/v1/interactions/events?group_id=%s", c.cfg.TargetURL, c.cfg.GroupID)
+		ratio := c.cfg.ThreadClientRatio
+		if ratio > 0 && rand.Float64() < ratio { //nolint:gosec
+			if rootID, ok := c.pool.GetRandomRoot(); ok && rootID != uuid.Nil {
+				reqURL = fmt.Sprintf("%s/v1/interactions/events?group_id=%s&root_id=%s", c.cfg.TargetURL, c.cfg.GroupID, rootID)
+			}
+		}
+
+		// Setup stream context with optional switch timer
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		var timer *time.Timer
+		if c.cfg.ClientSwitchInterval > 0 {
+			// Apply 20% jitter to prevent all clients switching at the exact same moment
+			jitter := time.Duration(float64(c.cfg.ClientSwitchInterval) * (0.8 + 0.4*rand.Float64())) //nolint:gosec
+			timer = time.AfterFunc(jitter, cancelStream)
+		}
+
+		cleanup := func() {
+			if timer != nil {
+				timer.Stop()
+			}
+			cancelStream()
+		}
+
+		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, reqURL, nil)
 		if err != nil {
+			cleanup()
 			c.metrics.RecordSSEError()
 			return
 		}
@@ -567,10 +597,13 @@ func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
 
 		resp, err := c.sseClient.Do(req)
 		if err != nil {
+			cleanup()
 			if ctx.Err() != nil {
 				return
 			}
-			c.metrics.RecordSSEError()
+			if streamCtx.Err() == nil {
+				c.metrics.RecordSSEError()
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -580,6 +613,7 @@ func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			cleanup()
 			c.metrics.RecordSSEError()
 			_ = resp.Body.Close()
 			select {
@@ -590,13 +624,14 @@ func (c *PressureController) runSSEClient(ctx context.Context, _ int) {
 			continue
 		}
 
-		c.readSSEStream(ctx, resp.Body)
+		c.readSSEStream(streamCtx, resp.Body)
 		_ = resp.Body.Close()
+		cleanup()
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }

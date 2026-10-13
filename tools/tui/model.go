@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -22,6 +23,8 @@ type Model struct {
 	runnerStatus status.RunnerStatus
 	runnerActive bool
 
+	viewport  viewport.Model
+	ready     bool
 	startTime time.Time
 	width     int
 	height    int
@@ -59,6 +62,7 @@ func (Model) Init() tea.Cmd {
 
 // Update processes Bubble Tea events, hotkeys, and tick notifications.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -77,6 +81,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
+		// Header is 1 line, footer is 1 line, leave room for scrollable viewport
+		viewportHeight := msg.Height - 2
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+
+		if !m.ready {
+			m.viewport = viewport.New(msg.Width, viewportHeight)
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = viewportHeight
+		}
+
 	case tickMsg:
 		m.updateRunnerStatus()
 
@@ -90,7 +108,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 	}
 
-	return m, nil
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
 }
 
 func (m *Model) updateRunnerStatus() {
@@ -116,8 +135,11 @@ func (m *Model) updateRunnerStatus() {
 // View constructs the single-pane dashboard layout.
 func (m Model) View() string {
 	cardWidth := m.width - 4
-	if cardWidth < 80 {
-		cardWidth = 80
+	if cardWidth < 70 {
+		cardWidth = 70
+	}
+	if m.width > 0 && cardWidth > m.width-2 {
+		cardWidth = m.width - 2
 	}
 
 	header := renderHeader(m)
@@ -127,9 +149,7 @@ func (m Model) View() string {
 	dbCard := renderDatabaseCard(m, cardWidth)
 	footer := renderFooter(m)
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		"",
+	cardsBody := lipgloss.JoinVertical(lipgloss.Left,
 		workloadCard,
 		"",
 		drainerCard,
@@ -137,9 +157,26 @@ func (m Model) View() string {
 		resourceCard,
 		"",
 		dbCard,
+	)
+
+	// If viewport is initialized (we received a WindowSizeMsg) and total content exceeds height,
+	// use the scrollable viewport so users can see all cards regardless of terminal size.
+	if m.ready && m.viewport.Height > 0 {
+		m.viewport.SetContent(cardsBody)
+		return lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			m.viewport.View(),
+			footer,
+		)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		"",
+		cardsBody,
 		"",
 		footer,
 	)
 
-	return lipgloss.NewStyle().Padding(1, 2).Render(content)
+	return lipgloss.NewStyle().Padding(0, 1).Render(content)
 }

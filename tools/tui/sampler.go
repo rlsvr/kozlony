@@ -130,30 +130,34 @@ func (s *Sampler) Sample(ctx context.Context) SystemSnapshot {
 	return snap
 }
 
+type consumerDetail struct {
+	Name      string `json:"name"`
+	Delivered struct {
+		StreamSeq uint64 `json:"stream_seq"`
+	} `json:"delivered"`
+	AckFloor struct {
+		StreamSeq uint64 `json:"stream_seq"`
+	} `json:"ack_floor"`
+	NumPending     int64 `json:"num_pending"`
+	NumAckPending  int64 `json:"num_ack_pending"`
+	NumRedelivered int64 `json:"num_redelivered"`
+	NumWaiting     int   `json:"num_waiting"`
+}
+
+type streamDetail struct {
+	Name  string `json:"name"`
+	State struct {
+		Messages int64  `json:"messages"`
+		Bytes    uint64 `json:"bytes"`
+		LastSeq  uint64 `json:"last_seq"`
+	} `json:"state"`
+	ConsumerDetail []consumerDetail `json:"consumer_detail"`
+}
+
 // jszResponse models the subset of the NATS /jsz?consumers=true monitoring endpoint.
 type jszResponse struct {
 	AccountDetails []struct {
-		StreamDetail []struct {
-			Name  string `json:"name"`
-			State struct {
-				Messages int64  `json:"messages"`
-				Bytes    uint64 `json:"bytes"`
-				LastSeq  uint64 `json:"last_seq"`
-			} `json:"state"`
-			ConsumerDetail []struct {
-				Name      string `json:"name"`
-				Delivered struct {
-					StreamSeq uint64 `json:"stream_seq"`
-				} `json:"delivered"`
-				AckFloor struct {
-					StreamSeq uint64 `json:"stream_seq"`
-				} `json:"ack_floor"`
-				NumPending     int64 `json:"num_pending"`
-				NumAckPending  int64 `json:"num_ack_pending"`
-				NumRedelivered int64 `json:"num_redelivered"`
-				NumWaiting     int   `json:"num_waiting"`
-			} `json:"consumer_detail"`
-		} `json:"stream_detail"`
+		StreamDetail []streamDetail `json:"stream_detail"`
 	} `json:"account_details"`
 }
 
@@ -185,33 +189,47 @@ func (s *Sampler) sampleJetStream(ctx context.Context, snap *SystemSnapshot) {
 
 	for _, acc := range data.AccountDetails {
 		for _, st := range acc.StreamDetail {
-			if st.Name == "BOARD" {
-				snap.JetStream.Connected = true
-				snap.JetStream.StreamName = st.Name
-				snap.JetStream.TotalMessages = st.State.Messages
-				snap.JetStream.TotalBytes = st.State.Bytes
-				snap.JetStream.LastSeq = st.State.LastSeq
-
-				for _, c := range st.ConsumerDetail {
-					cs := ConsumerStats{
-						Name:           c.Name,
-						Pending:        c.NumPending,
-						AckPending:     c.NumAckPending,
-						Redelivered:    c.NumRedelivered,
-						WaitingWorkers: c.NumWaiting,
-						StreamSeq:      c.Delivered.StreamSeq,
-						AckFloorSeq:    c.AckFloor.StreamSeq,
-					}
-					switch c.Name {
-					case "board-drainer":
-						snap.JetStream.Drainer = cs
-					case "board-counters":
-						snap.JetStream.Counter = cs
-					}
-				}
-				return
+			if st.Name != "BOARD" {
+				continue
 			}
+			snap.JetStream.Connected = true
+			snap.JetStream.StreamName = st.Name
+			snap.JetStream.TotalMessages = st.State.Messages
+			snap.JetStream.TotalBytes = st.State.Bytes
+			snap.JetStream.LastSeq = st.State.LastSeq
+
+			for _, c := range st.ConsumerDetail {
+				parseConsumerStats(c, snap)
+			}
+			return
 		}
+	}
+}
+
+func parseConsumerStats(c consumerDetail, snap *SystemSnapshot) {
+	cs := ConsumerStats{
+		Name:           c.Name,
+		Pending:        c.NumPending,
+		AckPending:     c.NumAckPending,
+		Redelivered:    c.NumRedelivered,
+		WaitingWorkers: c.NumWaiting,
+		StreamSeq:      c.Delivered.StreamSeq,
+		AckFloorSeq:    c.AckFloor.StreamSeq,
+	}
+	if strings.HasPrefix(c.Name, "board-drainer") {
+		snap.JetStream.Drainer.Name = "board-drainer"
+		snap.JetStream.Drainer.Pending += cs.Pending
+		snap.JetStream.Drainer.AckPending += cs.AckPending
+		snap.JetStream.Drainer.Redelivered += cs.Redelivered
+		snap.JetStream.Drainer.WaitingWorkers += cs.WaitingWorkers
+		if cs.StreamSeq > snap.JetStream.Drainer.StreamSeq {
+			snap.JetStream.Drainer.StreamSeq = cs.StreamSeq
+		}
+		if cs.AckFloorSeq > snap.JetStream.Drainer.AckFloorSeq {
+			snap.JetStream.Drainer.AckFloorSeq = cs.AckFloorSeq
+		}
+	} else if c.Name == "board-counters" {
+		snap.JetStream.Counter = cs
 	}
 }
 
@@ -237,7 +255,7 @@ func (s *Sampler) sampleProcess(ctx context.Context) (float64, float64) {
 }
 
 func (*Sampler) sampleDockerContainers(ctx context.Context, snap *SystemSnapshot) {
-	out, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{.Name}},{{.CPUPerc}},{{.MemUsage}}", "kozlony-postgres", "kozlony-nats").Output()
+	out, err := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{.Name}},{{.CPUPerc}},{{.MemUsage}}", "kozlony-api", "kozlony-postgres", "kozlony-nats").Output()
 	if err != nil {
 		return
 	}
@@ -252,6 +270,12 @@ func (*Sampler) sampleDockerContainers(ctx context.Context, snap *SystemSnapshot
 		mem := parseMemMB(parts[2])
 
 		switch name {
+		case "kozlony-api":
+			// If ps didn't find a host process (e.g. running in Docker), use container metrics
+			if snap.Kozlony.CPUPercent == 0 && snap.Kozlony.RAMMegs == 0 {
+				snap.Kozlony.CPUPercent = cpu
+				snap.Kozlony.RAMMegs = mem
+			}
 		case "kozlony-postgres":
 			snap.Postgres.CPUPercent = cpu
 			snap.Postgres.RAMMegs = mem

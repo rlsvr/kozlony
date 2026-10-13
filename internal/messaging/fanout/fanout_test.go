@@ -251,3 +251,31 @@ func TestFanoutGroupSubscriptionListener(t *testing.T) {
 		t.Fatalf("expected OnGroupInactive for g2, got: %v", listener.inactive)
 	}
 }
+
+func TestFanoutTopicDispatchDirectDelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := fanout.NewPipeline(ctx, 1*time.Millisecond, 10)
+	defer p.Stop()
+
+	rootID := uuid.MustParse("01923f12-0000-7000-8000-000000000099")
+	client := fanout.NewClient("c-worker-test", "root", &rootID, 50)
+	p.RegisterAndWait(client)
+
+	// In the zero-filter architecture, payload is dispatched directly to the target thread topic
+	payload := []byte(`{"id":"msg-worker-1","root_id":"01923f12-0000-7000-8000-000000000099","group_id":"root"}`)
+	delivered := p.Broadcast("root", &rootID, payload)
+	if delivered != 1 {
+		t.Fatalf("expected 1 delivered, got %d", delivered)
+	}
+
+	select {
+	case m := <-client.Events:
+		if string(m) != string(payload) {
+			t.Fatalf("expected payload %s, got: %s", string(payload), string(m))
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for topic dispatch to deliver message")
+	}
+}

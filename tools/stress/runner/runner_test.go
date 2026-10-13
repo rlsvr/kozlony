@@ -74,7 +74,7 @@ func TestConfigValidation(t *testing.T) {
 	require.Error(t, invalidWithClients.Validate())
 
 	tooManyWithClients := cfg
-	tooManyWithClients.WithClients = 10001
+	tooManyWithClients.WithClients = 50001
 	require.Error(t, tooManyWithClients.Validate())
 }
 

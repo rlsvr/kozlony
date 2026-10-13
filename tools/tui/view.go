@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 )
 
 var (
@@ -254,21 +254,21 @@ func renderResourceCard(m Model, cardWidth int) string {
 	rowKz := fmt.Sprintf("  %-30s  CPU: %5.1f%% %s  RAM: %7.1f MB",
 		"Kozlony Service (Echo+App)",
 		kzCPU,
-		renderBar(kzCPU, 100.0, barWidth),
+		renderBar(kzCPU, barWidth),
 		kzRAM,
 	)
 
 	rowPG := fmt.Sprintf("  %-30s  CPU: %5.1f%% %s  RAM: %7.1f MB",
 		"PostgreSQL 17 (Batched Ingest)",
 		pgCPU,
-		renderBar(pgCPU, 100.0, barWidth),
+		renderBar(pgCPU, barWidth),
 		pgRAM,
 	)
 
 	rowNATS := fmt.Sprintf("  %-30s  CPU: %5.1f%% %s  RAM: %7.1f MB",
 		"NATS JetStream (File Engine)",
 		natsCPU,
-		renderBar(natsCPU, 100.0, barWidth),
+		renderBar(natsCPU, barWidth),
 		natsRAM,
 	)
 
@@ -353,23 +353,17 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 		}
 		drainerPct = float64(drainerSeq) / float64(js.LastSeq)
 	}
-	drainerBar := gaugeMeterBar(drainerPct, cardWidth-48, colorAccent)
-	drainerSyncLine := fmt.Sprintf("  %-18s %s %5.1f%% (seq %d / %d)",
-		styleMuted.Render("Drainer Progress:"),
-		drainerBar,
-		drainerPct*100.0,
-		js.Drainer.AckFloorSeq,
-		js.LastSeq,
-	)
 
-	// Consumers table with strict column width formatting
-	headerCols := fmt.Sprintf("  %-20s %-16s %-18s %-14s %s",
-		styleMuted.Render("Consumer"),
-		styleMuted.Render("Pending Lag"),
-		styleMuted.Render("In-Flight (Ack)"),
-		styleMuted.Render("Redelivered"),
-		styleMuted.Render("Workers"),
-	)
+	progressText := fmt.Sprintf(" %5.1f%% (seq %d / %d)", drainerPct*100.0, js.Drainer.AckFloorSeq, js.LastSeq)
+	prefixLabel := "  Drainer Progress:  "
+	barWidth := cardWidth - len(prefixLabel) - len(progressText) - 6
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	drainerBar := renderBar(drainerPct*100.0, barWidth)
+	drainerSyncLine := styleMuted.Render(prefixLabel) + drainerBar + progressText
+
+	// Format consumer cell contents with diagnostic styles
 	drainerPendingStyle := styleOK
 	if js.Drainer.Pending > 500 {
 		drainerPendingStyle = styleWarn
@@ -389,21 +383,32 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 	drainerPendingStr := drainerPendingStyle.Render(fmt.Sprintf("%d", js.Drainer.Pending))
 	counterPendingStr := counterPendingStyle.Render(fmt.Sprintf("%d", js.Counter.Pending))
 
-	drainerRow := fmt.Sprintf("  %-20s %-16s %-18d %-14d %d waiting",
-		styleAccent.Render("board-drainer"),
-		drainerPendingStr,
-		js.Drainer.AckPending,
-		js.Drainer.Redelivered,
-		js.Drainer.WaitingWorkers,
-	)
-
-	counterRow := fmt.Sprintf("  %-20s %-16s %-18d %-14d %d waiting",
-		styleAccent.Render("board-counters"),
-		counterPendingStr,
-		js.Counter.AckPending,
-		js.Counter.Redelivered,
-		js.Counter.WaitingWorkers,
-	)
+	cTable := table.New().
+		Border(lipgloss.NormalBorder()).
+		BorderStyle(lipgloss.NewStyle().Foreground(colorBorder)).
+		Headers("Consumer", "Pending Lag", "In-Flight (Ack)", "Redelivered", "Workers").
+		Rows(
+			[]string{
+				styleAccent.Render("board-drainer"),
+				drainerPendingStr,
+				fmt.Sprintf("%d", js.Drainer.AckPending),
+				fmt.Sprintf("%d", js.Drainer.Redelivered),
+				fmt.Sprintf("%d waiting", js.Drainer.WaitingWorkers),
+			},
+			[]string{
+				styleAccent.Render("board-counters"),
+				counterPendingStr,
+				fmt.Sprintf("%d", js.Counter.AckPending),
+				fmt.Sprintf("%d", js.Counter.Redelivered),
+				fmt.Sprintf("%d waiting", js.Counter.WaitingWorkers),
+			},
+		).
+		StyleFunc(func(row, _ int) lipgloss.Style {
+			if row == table.HeaderRow {
+				return styleMuted.Padding(0, 1)
+			}
+			return lipgloss.NewStyle().Padding(0, 1)
+		})
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		cardTitle,
@@ -412,30 +417,10 @@ func renderJetStreamCard(m Model, cardWidth int) string {
 		"",
 		drainerSyncLine,
 		"",
-		headerCols,
-		drainerRow,
-		counterRow,
+		cTable.Render(),
 	)
 
 	return styleCard.Width(cardWidth).Render(body)
-}
-
-func gaugeMeterBar(percent float64, width int, barColor lipgloss.Color) string {
-	if width < 8 {
-		width = 8
-	}
-	if percent < 0 {
-		percent = 0
-	}
-	if percent > 1.0 {
-		percent = 1.0
-	}
-	p := progress.New(
-		progress.WithWidth(width),
-		progress.WithoutPercentage(),
-		progress.WithSolidFill(string(barColor)),
-	)
-	return p.ViewAs(percent)
 }
 
 func formatBytes(b uint64) string {
@@ -453,16 +438,13 @@ func formatBytes(b uint64) string {
 
 func renderFooter(m Model) string {
 	elapsed := time.Since(m.startTime).Truncate(time.Second)
-	hints := "[q] Quit  [c] Clear Snapshot"
+	hints := "[q] Quit  [c] Clear  [↑/↓/j/k] Scroll"
 	status := fmt.Sprintf("Uptime: %v | %s", elapsed, hints)
 	return styleFooter.Width(m.width).Render(status)
 }
 
-func renderBar(val, maxVal float64, width int) string {
-	if maxVal <= 0 {
-		maxVal = 100.0
-	}
-	frac := val / maxVal
+func renderBar(pct float64, width int) string {
+	frac := pct / 100.0
 	if frac > 1.0 {
 		frac = 1.0
 	}

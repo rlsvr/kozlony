@@ -93,6 +93,31 @@ func (p *InteractionPool) GetRandomParent() (InteractionRef, bool) {
 	return p.items[idx], true
 }
 
+// GetRandomRoot returns a random root post UUID from the pool if available.
+func (p *InteractionPool) GetRandomRoot() (uuid.UUID, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	n := len(p.items)
+	if n == 0 {
+		return uuid.Nil, false
+	}
+
+	// Try a few random picks to find a root (depth == 0 or root_id == nil)
+	for attempts := 0; attempts < 10; attempts++ {
+		idx := rand.Intn(n) //nolint:gosec
+		item := p.items[idx]
+		if item.Depth == 0 || item.RootID == nil {
+			return item.ID, true
+		}
+		if item.RootID != nil {
+			return *item.RootID, true
+		}
+	}
+
+	return p.items[0].ID, true
+}
+
 // GetRandomForEdit returns a random interaction for optimistic editing using an RLock.
 func (p *InteractionPool) GetRandomForEdit() (InteractionRef, bool) {
 	p.mu.RLock()

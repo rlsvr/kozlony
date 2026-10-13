@@ -88,6 +88,26 @@ func TestSubjectGenerators(t *testing.T) {
 			got:      messaging.SubjectDeadLetter("BOARD"),
 			expected: "BOARD.dlq",
 		},
+		{
+			name:     "SubjectIngestPartition",
+			got:      messaging.SubjectIngestPartition(3),
+			expected: "INGEST.p.3",
+		},
+		{
+			name:     "SubjectIngestFilter",
+			got:      messaging.SubjectIngestFilter(),
+			expected: "INGEST.p.*",
+		},
+		{
+			name:     "SubjectLiveFeed",
+			got:      messaging.SubjectLiveFeed("LIVE", "dev"),
+			expected: "LIVE.dev.feed",
+		},
+		{
+			name:     "SubjectLiveThread",
+			got:      messaging.SubjectLiveThread("LIVE", "dev", "01923f12-0000-7000-8000-000000000001"),
+			expected: "LIVE.dev.thread.01923f12-0000-7000-8000-000000000001",
+		},
 	}
 
 	for _, tt := range tests {
@@ -138,5 +158,29 @@ func TestCounterSubjectIsOutsideDrainerFilter(t *testing.T) {
 	}
 	if !strings.HasPrefix(messaging.SubjectStreamFilter("BOARD"), "BOARD.") {
 		t.Error("stream filter must still capture every group so counter events are retained")
+	}
+}
+
+func TestPartitionForThread(t *testing.T) {
+	numPartitions := 16
+	p1 := messaging.PartitionForThread("01923f12-0000-7000-8000-000000000001", numPartitions)
+	p2 := messaging.PartitionForThread("01923f12-0000-7000-8000-000000000001", numPartitions)
+	if p1 != p2 {
+		t.Fatalf("expected deterministic partition, got %d and %d", p1, p2)
+	}
+	if p1 < 0 || p1 >= numPartitions {
+		t.Fatalf("partition %d out of range [0, %d)", p1, numPartitions)
+	}
+
+	// Empty thread defaults to valid partition range
+	pEmpty := messaging.PartitionForThread("", numPartitions)
+	if pEmpty < 0 || pEmpty >= numPartitions {
+		t.Fatalf("empty thread partition %d out of range", pEmpty)
+	}
+
+	// 1 partition edge case
+	pSingle := messaging.PartitionForThread("any-thread", 1)
+	if pSingle != 0 {
+		t.Fatalf("expected partition 0 for single partition, got %d", pSingle)
 	}
 }

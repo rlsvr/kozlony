@@ -12,22 +12,24 @@ const MaxAllowedWorkers = 2000
 
 // Config defines the runtime configuration for the load generator and pressure controller.
 type Config struct {
-	TargetURL      string
-	Users          int           // Population size of simulated users
-	Workers        int           // Execution worker pool concurrency
-	RPS            float64       // Target requests per second ceiling (0 for unconstrained)
-	MinBody        int           // Minimum interaction body character length (default: 0)
-	MaxBody        int           // Maximum interaction body character length (default: 1000)
-	Duration       time.Duration // Total test duration (0 for indefinite)
-	GroupID        string
-	ReportInterval time.Duration
-	RootWeight     int
-	ReplyWeight    int
-	EditWeight     int
-	ReadWeight     int
-	WithClients    int           // Number of concurrent real-time SSE stream subscriber clients (default: 0)
-	MinThink       time.Duration // Simulated per-user cooldown before its next request
-	MaxThink       time.Duration // Simulated per-user cooldown before its next request
+	TargetURL            string
+	Users                int           // Population size of simulated users
+	Workers              int           // Execution worker pool concurrency
+	RPS                  float64       // Target requests per second ceiling (0 for unconstrained)
+	MinBody              int           // Minimum interaction body character length (default: 0)
+	MaxBody              int           // Maximum interaction body character length (default: 1000)
+	Duration             time.Duration // Total test duration (0 for indefinite)
+	GroupID              string
+	ReportInterval       time.Duration
+	RootWeight           int
+	ReplyWeight          int
+	EditWeight           int
+	ReadWeight           int
+	WithClients          int           // Number of concurrent real-time SSE stream subscriber clients (default: 0)
+	ClientSwitchInterval time.Duration // Interval after which SSE clients switch streams (0 to disable switching)
+	ThreadClientRatio    float64       // Ratio of SSE clients assigned to specific threads vs root feed (0.0 to 1.0, default 0.7)
+	MinThink             time.Duration // Simulated per-user cooldown before its next request
+	MaxThink             time.Duration // Simulated per-user cooldown before its next request
 }
 
 // ThinkCeiling reports the highest request rate this configuration can sustain.
@@ -53,20 +55,22 @@ func (c Config) ThinkCeiling() float64 {
 // DefaultConfig returns reasonable default settings for a stress test session.
 func DefaultConfig() Config {
 	return Config{
-		TargetURL:      "http://localhost:8080",
-		Users:          1000,
-		Workers:        200,
-		RPS:            0,
-		MinBody:        0,
-		MaxBody:        1000,
-		Duration:       0,
-		GroupID:        "root",
-		ReportInterval: 1 * time.Second,
-		RootWeight:     20,
-		ReplyWeight:    55,
-		EditWeight:     15,
-		ReadWeight:     10,
-		WithClients:    0,
+		TargetURL:            "http://localhost:8080",
+		Users:                1000,
+		Workers:              200,
+		RPS:                  0,
+		MinBody:              0,
+		MaxBody:              1000,
+		Duration:             0,
+		GroupID:              "root",
+		ReportInterval:       1 * time.Second,
+		RootWeight:           20,
+		ReplyWeight:          55,
+		EditWeight:           15,
+		ReadWeight:           10,
+		WithClients:          0,
+		ClientSwitchInterval: 10 * time.Second,
+		ThreadClientRatio:    0.7,
 	}
 }
 
@@ -91,6 +95,8 @@ func ParseFlags(args []string) (Config, error) {
 	fs.IntVar(&cfg.EditWeight, "weight-edit", cfg.EditWeight, "Probability weight for editing existing interactions")
 	fs.IntVar(&cfg.ReadWeight, "weight-read", cfg.ReadWeight, "Probability weight for reading feeds and threads")
 	fs.IntVar(&cfg.WithClients, "with-clients", cfg.WithClients, "Number of concurrent live SSE stream subscriber clients (default: 0)")
+	fs.DurationVar(&cfg.ClientSwitchInterval, "client-switch-interval", cfg.ClientSwitchInterval, "Interval after which SSE clients switch streams (e.g. 10s, 0 to disable)")
+	fs.Float64Var(&cfg.ThreadClientRatio, "thread-client-ratio", cfg.ThreadClientRatio, "Ratio of SSE clients assigned to specific threads vs root feed (0.0 to 1.0)")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -120,8 +126,14 @@ func (c *Config) Validate() error {
 	if c.WithClients < 0 {
 		return errors.New("with-clients must be non-negative")
 	}
-	if c.WithClients > 10000 {
-		return errors.New("with-clients exceeds maximum safe client limit of 10000")
+	if c.WithClients > 50000 {
+		return errors.New("with-clients exceeds maximum safe client limit of 50000")
+	}
+	if c.ThreadClientRatio < 0 || c.ThreadClientRatio > 1.0 {
+		return errors.New("thread-client-ratio must be between 0.0 and 1.0")
+	}
+	if c.ClientSwitchInterval < 0 {
+		return errors.New("client-switch-interval cannot be negative")
 	}
 	if c.MinBody < 0 || c.MaxBody < 0 {
 		return errors.New("body lengths must be non-negative")

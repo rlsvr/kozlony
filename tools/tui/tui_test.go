@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -82,4 +83,38 @@ func TestModelViewRendersAllCards(t *testing.T) {
 	assert.Contains(t, view, "JETSTREAM & DRAINER PIPELINE TELEMETRY")
 	assert.Contains(t, view, "SYSTEM RESOURCES")
 	assert.Contains(t, view, "DATABASE & HIERARCHICAL CONVERSATION STATE")
+}
+
+func TestModelViewAdaptiveWidths(t *testing.T) {
+	for _, w := range []int{60, 80, 100, 140, 200} {
+		model := NewModel("/nonexistent", "http://localhost:8080", nil)
+		model.width = w
+		model.height = 40
+		model.metricsSnap = status.Snapshot{
+			TotalRequests: 50,
+		}
+		view := model.View()
+		assert.NotEmpty(t, view)
+		assert.Contains(t, view, "JETSTREAM & DRAINER PIPELINE TELEMETRY")
+	}
+}
+
+func TestModelSmallTerminalWindowSize(t *testing.T) {
+	model := NewModel("/nonexistent", "http://localhost:8080", nil)
+	// Simulate small terminal resize: 80 cols, 20 rows
+	updatedModel, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m, ok := updatedModel.(Model)
+	require.True(t, ok)
+	require.True(t, m.ready)
+	assert.Equal(t, 80, m.width)
+	assert.Equal(t, 20, m.height)
+
+	m.metricsSnap = status.Snapshot{
+		TotalRequests: 200,
+	}
+
+	view := m.View()
+	assert.NotEmpty(t, view)
+	assert.Contains(t, view, "⚡ KOZLONY TUI STACK & LOAD MONITOR")
+	assert.Contains(t, view, "WORKLOAD & THROUGHPUT")
 }

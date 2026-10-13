@@ -315,3 +315,19 @@ func TestDrainer_ConcurrentWorkers(t *testing.T) {
 
 	d.Start(ctx)
 }
+
+func TestDrainer_Stop(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConsumer := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	d := drainer.New(mockConsumer, mockRepo, nil, nil)
+
+	ctx := context.Background()
+	d.Start(ctx)
+
+	// Calling Stop should cleanly cancel internal context and wait for workers to exit without hanging
+	d.Stop()
+}
