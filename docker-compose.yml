@@ -11,6 +11,14 @@ services:
       - "-c"
       - "wal_buffers=32MB"
       - "-c"
+      - "max_wal_size=10GB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "checkpoint_timeout=15min"
+      - "-c"
       - "synchronous_commit=off"
       - "-c"
       - "max_connections=100"
@@ -27,7 +35,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '4'
+          cpus: '6'
           memory: 4G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d messageboard"]
@@ -49,8 +57,12 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
+          cpus: '4'
           memory: 2G
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
@@ -69,14 +81,20 @@ services:
       ADDR: ":8080"
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/messageboard?sslmode=disable"
       NATS_URL: "nats://nats:4222"
-      NATS_CONCURRENT_SUBSCRIBERS: "8"
+      NATS_CONCURRENT_SUBSCRIBERS: "16"
+      INGEST_PARTITIONS: "16"
+      LIVE_PREFIX: "LIVE"
       NATS_COUNTER_CONSUMER_NAME: "board-counters"
-      DRAIN_BATCH_SIZE: "2000"
-      DRAIN_FLUSH_INTERVAL: "100ms"
+      DRAIN_BATCH_SIZE: "500"
+      DRAIN_FLUSH_INTERVAL: "50ms"
       DATABASE_MAX_CONNS: "50"
       LOG_LEVEL: "info"
     ports:
       - "8080:8080"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,8 +103,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 2G
+          cpus: '8'
+          memory: 4G
     networks:
       - kozlony_net
 
