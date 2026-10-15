@@ -331,3 +331,97 @@ func TestDrainer_Stop(t *testing.T) {
 	// Calling Stop should cleanly cancel internal context and wait for workers to exit without hanging
 	d.Stop()
 }
+
+type mockCombinedDrainerFetcher struct {
+	*drainermocks.MockBatchFetcher
+	*drainermocks.MockPartitionBatchFetcher
+}
+
+func TestDrainer_PartitionBatchFetcher(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBF := drainermocks.NewMockBatchFetcher(ctrl)
+	mockPF := drainermocks.NewMockPartitionBatchFetcher(ctrl)
+	fetcher := &mockCombinedDrainerFetcher{MockBatchFetcher: mockBF, MockPartitionBatchFetcher: mockPF}
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	id := uuid.Must(uuid.NewV7()).String()
+	evt := events.InteractionCreatedEvent{
+		Author:    testAuthor,
+		Body:      "Partition batch message",
+		CreatedAt: time.Now().UTC(),
+		GroupID:   testGroupID,
+		ID:        id,
+		Version:   1,
+	}
+	data, _ := json.Marshal(evt)
+	msg := newFakeMsg("INGEST.p.5", data)
+
+	batchCh := make(chan jetstream.Msg, 1)
+	batchCh <- msg
+	close(batchCh)
+	batch := &fakeMessageBatch{ch: batchCh}
+
+	mockPF.EXPECT().
+		FetchPartition(5, 10, gomock.Any()).
+		Return(batch, nil)
+
+	mockRepo.EXPECT().
+		InsertBatchWithCounts(gomock.Any(), gomock.Len(1)).
+		Return(nil, nil)
+
+	cfg := &config.Config{
+		DrainBatchSize:   10,
+		IngestPartitions: 16,
+	}
+	d := drainer.New(fetcher, mockRepo, nil, cfg)
+
+	count, err := d.ProcessBatchForPartition(context.Background(), 5)
+	if err != nil {
+		t.Fatalf("ProcessBatchForPartition failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 interaction drained, got %d", count)
+	}
+	if !msg.acked {
+		t.Error("expected message to be acked")
+	}
+}
+
+func TestDrainer_RunWorkerPartitionDistribution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBF := drainermocks.NewMockBatchFetcher(ctrl)
+	mockPF := drainermocks.NewMockPartitionBatchFetcher(ctrl)
+	fetcher := &mockCombinedDrainerFetcher{MockBatchFetcher: mockBF, MockPartitionBatchFetcher: mockPF}
+	mockRepo := dbmocks.NewMockRepository(ctrl)
+
+	cfg := &config.Config{
+		DrainBatchSize:   10,
+		IngestPartitions: 4,
+	}
+	d := drainer.New(fetcher, mockRepo, nil, cfg)
+
+	// Worker 1 canceled immediately
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	cancel1()
+	if err := d.RunWorker(ctx1, 1); err != nil {
+		t.Errorf("expected nil error on canceled worker 1, got %v", err)
+	}
+
+	// Worker 4 should pull from partition 3: (4 - 1) % 4 = 3
+	ctx4, cancel4 := context.WithCancel(context.Background())
+	mockPF.EXPECT().
+		FetchPartition(3, 10, gomock.Any()).
+		DoAndReturn(func(p, b int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+			cancel4()
+			ch := make(chan jetstream.Msg)
+			close(ch)
+			return &fakeMessageBatch{ch: ch}, nil
+		}).
+		AnyTimes()
+
+	_ = d.RunWorker(ctx4, 4)
+}

@@ -22,3 +22,5 @@ tmp/
 .DS_Store
 
 _docs
+*.zip
+*.pprof

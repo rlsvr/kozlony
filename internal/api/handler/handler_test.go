@@ -29,9 +29,12 @@ const (
 )
 
 type mockPublisher struct {
-	lastCreatedEvent *events.InteractionCreatedEvent
-	lastEditedEvent  *events.InteractionEditedEvent
-	editedPublishes  int
+	lastCreatedEvent     *events.InteractionCreatedEvent
+	lastEditedEvent      *events.InteractionEditedEvent
+	editedPublishes      int
+	lastFilteredGroupID  *string
+	lastFilteredRootID   *uuid.UUID
+	filteredSubscribeCalls int
 }
 
 func (m *mockPublisher) PublishInteractionCreated(_ context.Context, evt *events.InteractionCreatedEvent) (*jetstream.PubAck, error) {
@@ -50,7 +53,10 @@ func (*mockPublisher) SubscribeEvents(_ context.Context, _ *string) (<-chan []by
 	return ch, func() {}, nil
 }
 
-func (*mockPublisher) SubscribeFilteredEvents(_ context.Context, _ *string, _ *uuid.UUID) (<-chan []byte, func(), error) {
+func (m *mockPublisher) SubscribeFilteredEvents(_ context.Context, groupID *string, rootID *uuid.UUID) (<-chan []byte, func(), error) {
+	m.lastFilteredGroupID = groupID
+	m.lastFilteredRootID = rootID
+	m.filteredSubscribeCalls++
 	ch := make(chan []byte, 10)
 	return ch, func() {}, nil
 }
@@ -727,3 +733,85 @@ func TestCreateInteraction_HierarchicalNavigationAndCache(t *testing.T) {
 		t.Errorf("expected reply 2 ParentId to point to reply 1 %s, got %v", createdR1.Id, createdR2.ParentId)
 	}
 }
+
+func TestEventsInteractions_FilteredByRootID(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rootUUID := uuid.Must(uuid.NewV7())
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/interactions/events?root_id="+rootUUID.String(), nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	// Cancel context immediately so the SSE loop terminates
+	cancel()
+
+	grp := "dev"
+	params := server.EventsInteractionsParams{
+		GroupId: &grp,
+		RootId:  &rootUUID,
+	}
+
+	if err := h.EventsInteractions(c, params); err != nil {
+		t.Fatalf("unexpected error from EventsInteractions: %v", err)
+	}
+
+	if pub.filteredSubscribeCalls != 1 {
+		t.Errorf("expected 1 call to SubscribeFilteredEvents, got %d", pub.filteredSubscribeCalls)
+	}
+	if pub.lastFilteredRootID == nil || *pub.lastFilteredRootID != rootUUID {
+		t.Errorf("expected filter root_id %s, got %v", rootUUID, pub.lastFilteredRootID)
+	}
+	if pub.lastFilteredGroupID == nil || *pub.lastFilteredGroupID != "dev" {
+		t.Errorf("expected filter group_id dev, got %v", pub.lastFilteredGroupID)
+	}
+}
+
+func TestListInteractions_WithTimestampCursor(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo, nil)
+
+	now := time.Now().UTC()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/interactions", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	params := server.ListInteractionsParams{
+		Cursor: &now,
+	}
+
+	if err := h.ListInteractions(c, params); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK, got %d", rec.Code)
+	}
+}
+
+func TestCreateInteraction_ParentNotFound(t *testing.T) {
+	e := echo.New()
+	pub := &mockPublisher{}
+	repo := newMockRepository()
+	h := handler.New(pub, repo, nil)
+
+	missingParentID := uuid.Must(uuid.NewV7())
+	payload := fmt.Sprintf(`{"author":"Alice","body":"Orphan reply","parent_id":"%s"}`, missingParentID)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/interactions", strings.NewReader(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	key := uuid.New().String()
+	_ = h.CreateInteraction(c, server.CreateInteractionParams{IdempotencyKey: key})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for non-existent parent, got %d", rec.Code)
+	}
+}
+

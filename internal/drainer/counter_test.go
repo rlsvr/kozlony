@@ -600,4 +600,91 @@ func TestDrainer_CommitsWhenParentNotVisible(t *testing.T) {
 	}
 }
 
+// Verifies that when a fetcher implements PartitionBatchFetcher, ProcessBatchForPartition
+// calls FetchPartition with the expected partition number.
+type mockCombinedFetcher struct {
+	*drainermocks.MockBatchFetcher
+	*drainermocks.MockPartitionBatchFetcher
+}
+
+func TestCounter_PartitionBatchFetcher(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	id := uuid.Must(uuid.NewV7())
+	mockBF := drainermocks.NewMockBatchFetcher(ctrl)
+	mockPF := drainermocks.NewMockPartitionBatchFetcher(ctrl)
+	fetcher := &mockCombinedFetcher{MockBatchFetcher: mockBF, MockPartitionBatchFetcher: mockPF}
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+
+	mockRepo.EXPECT().
+		ApplyReplyCounts(gomock.Any(), gomock.Any()).
+		Return(nil, nil)
+
+	msg := counterMsg(t, map[string]int{id.String(): 42})
+
+	// Must call FetchPartition specifically on partition 7
+	mockPF.EXPECT().
+		FetchPartition(7, 10, gomock.Any()).
+		Return(batchOf(msg), nil)
+
+	cfg := &config.Config{
+		DrainBatchSize:   10,
+		IngestPartitions: 16,
+	}
+	c := drainer.NewCounter(fetcher, mockRepo, cfg)
+
+	count, err := c.ProcessBatchForPartition(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("ProcessBatchForPartition failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 applied count, got %d", count)
+	}
+	if !msg.acked {
+		t.Error("expected message to be acked")
+	}
+}
+
+// Verifies worker ID to partition mapping: (workerID - 1) % numPartitions.
+func TestCounter_RunWorkerPartitionDistribution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockBF := drainermocks.NewMockBatchFetcher(ctrl)
+	mockPF := drainermocks.NewMockPartitionBatchFetcher(ctrl)
+	fetcher := &mockCombinedFetcher{MockBatchFetcher: mockBF, MockPartitionBatchFetcher: mockPF}
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+
+	cfg := &config.Config{
+		DrainBatchSize:   10,
+		IngestPartitions: 4,
+	}
+	c := drainer.NewCounter(fetcher, mockRepo, cfg)
+
+	// Worker 1 should pull from partition 0
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	cancel1()
+	if err := c.RunWorker(ctx1, 1); err != nil {
+		t.Errorf("expected nil error on canceled worker 1, got %v", err)
+	}
+
+	// Worker 3 should pull from partition 2: (3 - 1) % 4 = 2
+	ctx3, cancel3 := context.WithCancel(context.Background())
+	mockPF.EXPECT().
+		FetchPartition(2, 10, gomock.Any()).
+		DoAndReturn(func(p, b int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+			cancel3()
+			return batchOf(), nil
+		}).
+		AnyTimes()
+
+	_ = c.RunWorker(ctx3, 3)
+
+	if workers := c.Workers(); workers != 1 {
+		t.Errorf("expected default 1 worker, got %d", workers)
+	}
+}
+
 func ptrTo(s string) *string { return &s }
+
