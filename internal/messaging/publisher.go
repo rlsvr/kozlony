@@ -196,8 +196,21 @@ func (p *Publisher) PublishReplyCountsRecalculated(ctx context.Context, evt *eve
 		return fmt.Errorf("marshal reply counts recalculated event: %w", err)
 	}
 
-	subject := SubjectReplyCountsRecalculated(p.cfg.NATSStreamName, evt.GroupID)
-	if _, err := p.Publish(ctx, subject, data); err != nil {
+	numPartitions := p.cfg.IngestPartitions
+	if numPartitions <= 0 {
+		numPartitions = DefaultCounterPartitions
+	}
+	partition := PartitionForGroup(evt.GroupID, numPartitions)
+	subject := SubjectCounterPartition(partition)
+
+	msg := &natsio.Msg{
+		Subject: subject,
+		Data:    data,
+		Header:  natsio.Header{},
+	}
+	msg.Header.Set("X-Group-ID", evt.GroupID)
+
+	if _, err := p.PublishMsg(ctx, msg); err != nil {
 		return fmt.Errorf("publish reply counts: %w", err)
 	}
 

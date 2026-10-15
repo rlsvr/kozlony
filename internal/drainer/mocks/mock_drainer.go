@@ -62,6 +62,50 @@ func (mr *MockBatchFetcherMockRecorder) Fetch(batch any, opts ...any) *gomock.Ca
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Fetch", reflect.TypeOf((*MockBatchFetcher)(nil).Fetch), varargs...)
 }
 
+// MockPartitionBatchFetcher is a mock of PartitionBatchFetcher interface.
+type MockPartitionBatchFetcher struct {
+	ctrl     *gomock.Controller
+	recorder *MockPartitionBatchFetcherMockRecorder
+	isgomock struct{}
+}
+
+// MockPartitionBatchFetcherMockRecorder is the mock recorder for MockPartitionBatchFetcher.
+type MockPartitionBatchFetcherMockRecorder struct {
+	mock *MockPartitionBatchFetcher
+}
+
+// NewMockPartitionBatchFetcher creates a new mock instance.
+func NewMockPartitionBatchFetcher(ctrl *gomock.Controller) *MockPartitionBatchFetcher {
+	mock := &MockPartitionBatchFetcher{ctrl: ctrl}
+	mock.recorder = &MockPartitionBatchFetcherMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockPartitionBatchFetcher) EXPECT() *MockPartitionBatchFetcherMockRecorder {
+	return m.recorder
+}
+
+// FetchPartition mocks base method.
+func (m *MockPartitionBatchFetcher) FetchPartition(partition, batch int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{partition, batch}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "FetchPartition", varargs...)
+	ret0, _ := ret[0].(jetstream.MessageBatch)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FetchPartition indicates an expected call of FetchPartition.
+func (mr *MockPartitionBatchFetcherMockRecorder) FetchPartition(partition, batch any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{partition, batch}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchPartition", reflect.TypeOf((*MockPartitionBatchFetcher)(nil).FetchPartition), varargs...)
+}
+
 // MockDLQPublisher is a mock of DLQPublisher interface.
 type MockDLQPublisher struct {
 	ctrl     *gomock.Controller

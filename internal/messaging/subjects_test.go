@@ -184,3 +184,25 @@ func TestPartitionForThread(t *testing.T) {
 		t.Fatalf("expected partition 0 for single partition, got %d", pSingle)
 	}
 }
+
+func TestPartitionForGroup(t *testing.T) {
+	numPartitions := 16
+	p1 := messaging.PartitionForGroup("root", numPartitions)
+	p2 := messaging.PartitionForGroup("root", numPartitions)
+	if p1 != p2 {
+		t.Fatalf("expected deterministic partition, got %d and %d", p1, p2)
+	}
+	if p1 < 0 || p1 >= numPartitions {
+		t.Fatalf("partition %d out of range [0, %d)", p1, numPartitions)
+	}
+
+	// Counter partition subject tests
+	subj := messaging.SubjectCounterPartition(3)
+	if subj != "COUNTER.p.3" {
+		t.Fatalf("expected COUNTER.p.3, got %s", subj)
+	}
+	filter := messaging.SubjectCounterFilter()
+	if filter != "COUNTER.p.*" {
+		t.Fatalf("expected COUNTER.p.*, got %s", filter)
+	}
+}

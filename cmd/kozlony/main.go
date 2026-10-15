@@ -107,7 +107,7 @@ func main() {
 		batchDrainer *drainer.Drainer
 	)
 	if msgClient != nil && repo != nil {
-		counterConsumer, err := messaging.NewCounterConsumer(ctx, msgClient)
+		counterConsumer, err := messaging.NewCounterConsumer(ctx, msgClient, cfg.IngestPartitions)
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream counter consumer")
 		} else {

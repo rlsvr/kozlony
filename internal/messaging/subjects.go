@@ -30,6 +30,9 @@ const (
 
 	// EventReplyCountsSuffix is the subject suffix for recalculated reply counts.
 	EventReplyCountsSuffix = "counter.replied"
+
+	// DefaultCounterPartitions is the default number of reply counter partitions.
+	DefaultCounterPartitions = 16
 )
 
 // SubjectIngestPartition returns the JetStream subject for an ingestion partition.
@@ -40,6 +43,26 @@ func SubjectIngestPartition(partition int) string {
 // SubjectIngestFilter returns the wildcard capturing all ingest partitions.
 func SubjectIngestFilter() string {
 	return "INGEST.p.*"
+}
+
+// SubjectCounterPartition returns the JetStream subject for a reply count partition.
+func SubjectCounterPartition(partition int) string {
+	return fmt.Sprintf("COUNTER.p.%d", partition)
+}
+
+// SubjectCounterFilter returns the wildcard capturing all counter partitions.
+func SubjectCounterFilter() string {
+	return "COUNTER.p.*"
+}
+
+// PartitionForGroup hashes a group ID into a deterministic partition index [0, numPartitions).
+func PartitionForGroup(groupID string, numPartitions int) int {
+	if numPartitions <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(groupID))
+	return int(h.Sum32() % uint32(numPartitions))
 }
 
 // SubjectLiveFeed returns the ephemeral Core NATS topic for board feed events.

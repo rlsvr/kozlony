@@ -40,8 +40,21 @@ type ReplyCountWriter interface {
 // Redelivery is safe without any dedup bookkeeping: the drainer sends absolute totals, and
 // applying the same total twice leaves the same value. ApplyReplyCounts additionally guards
 // monotonicity so a delayed event cannot walk the count backwards.
+// Counter applies recalculated reply counts produced by the drainer.
+//
+// It exists to take reply_count writes out of the drainer's insert transaction. The
+// drainer previously incremented reply_count while holding a transaction open for a whole
+// batch, which held a row-level exclusive lock on every touched parent until COMMIT and
+// serialized all other writers against hot threads. Here each batch is applied in its own
+// small transaction, so those locks are held for microseconds.
+//
+// Redelivery is safe without any dedup bookkeeping: the drainer sends absolute totals, and
+// applying the same total twice leaves the same value. ApplyReplyCounts additionally guards
+// monotonicity so a delayed event cannot walk the count backwards.
 type Counter struct {
 	fetcher       BatchFetcher
+	partFetcher   PartitionBatchFetcher
+	numPartitions int
 	repo          ReplyCountWriter
 	batchSize     int
 	flushInterval time.Duration
@@ -56,6 +69,7 @@ func NewCounter(fetcher BatchFetcher, repo ReplyCountWriter, cfg *config.Config)
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	workers := 1
+	numPartitions := 1
 	if cfg != nil {
 		if cfg.DrainBatchSize > 0 {
 			batchSize = cfg.DrainBatchSize
@@ -66,30 +80,49 @@ func NewCounter(fetcher BatchFetcher, repo ReplyCountWriter, cfg *config.Config)
 		if cfg.NATSConcurrentSubscribers > 0 {
 			workers = cfg.NATSConcurrentSubscribers
 		}
+		if cfg.IngestPartitions > 0 {
+			numPartitions = cfg.IngestPartitions
+		}
 	}
 
-	return &Counter{
+	c := &Counter{
 		fetcher:       fetcher,
+		numPartitions: numPartitions,
 		repo:          repo,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		workers:       workers,
 	}
+
+	if pf, ok := fetcher.(PartitionBatchFetcher); ok {
+		c.partFetcher = pf
+	}
+
+	return c
 }
 
-// ProcessBatch fetches one batch of reply count events, merges them into the highest count
-// seen per interaction, applies the result, and acknowledges the messages.
-//
-// Counts are merged with max() rather than overwritten because events for one interaction
-// may arrive across several batches and out of order. Only the highest total is applied,
-// which is both correct under reordering and immune to double application.
+// ProcessBatch fetches one batch of reply count events from partition 0.
 func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
-	mb, err := c.fetcher.Fetch(c.batchSize, jetstream.FetchMaxWait(c.flushInterval))
+	return c.ProcessBatchForPartition(ctx, 0)
+}
+
+// ProcessBatchForPartition fetches one batch of reply count events from a specific partition,
+// merges them into the highest count seen per interaction, applies the result, and acknowledges.
+func (c *Counter) ProcessBatchForPartition(ctx context.Context, partition int) (int, error) {
+	var (
+		mb  jetstream.MessageBatch
+		err error
+	)
+	if c.partFetcher != nil {
+		mb, err = c.partFetcher.FetchPartition(partition, c.batchSize, jetstream.FetchMaxWait(c.flushInterval))
+	} else {
+		mb, err = c.fetcher.Fetch(c.batchSize, jetstream.FetchMaxWait(c.flushInterval))
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("fetch reply count batch from jetstream: %w", err)
+		return 0, fmt.Errorf("fetch reply count batch from jetstream partition %d: %w", partition, err)
 	}
 
 	var (
@@ -193,22 +226,28 @@ func (c *Counter) ProcessBatch(ctx context.Context) (int, error) {
 
 // RunWorker continuously applies reply count batches until ctx is canceled.
 func (c *Counter) RunWorker(ctx context.Context, workerID int) error {
+	partition := 0
+	if c.numPartitions > 1 {
+		partition = (workerID - 1) % c.numPartitions
+	}
+
 	log.Info().
 		Int("worker_id", workerID).
+		Int("partition", partition).
 		Int("batch_size", c.batchSize).
 		Msg("starting reply count counter worker")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info().Int("worker_id", workerID).Msg("stopping reply count counter worker")
+			log.Info().Int("worker_id", workerID).Int("partition", partition).Msg("stopping reply count counter worker")
 			return nil
 		default:
-			if _, err := c.ProcessBatch(ctx); err != nil {
-				log.Error().Err(err).Int("worker_id", workerID).Msg("counter: error processing batch")
+			if _, err := c.ProcessBatchForPartition(ctx, partition); err != nil {
+				log.Error().Err(err).Int("worker_id", workerID).Int("partition", partition).Msg("counter: error processing batch")
 				select {
 				case <-ctx.Done():
-					log.Info().Int("worker_id", workerID).Msg("stopping reply count counter worker")
+					log.Info().Int("worker_id", workerID).Int("partition", partition).Msg("stopping reply count counter worker")
 					return nil
 				case <-time.After(100 * time.Millisecond):
 				}

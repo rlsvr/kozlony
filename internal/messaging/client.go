@@ -83,6 +83,7 @@ func (c *Client) EnsureStream(ctx context.Context) error {
 		Subjects: []string{
 			SubjectStreamFilter(c.cfg.NATSStreamName),
 			SubjectIngestFilter(),
+			SubjectCounterFilter(),
 		},
 		Retention: jetstream.LimitsPolicy,
 		Storage:   jetstream.FileStorage,
@@ -139,6 +140,9 @@ func (c *Client) StartPullConsumer(
 
 // Conn returns the underlying hirnok Conn.
 func (c *Client) Conn() *qpnats.Conn {
+	if c == nil {
+		return nil
+	}
 	return c.conn
 }
 
