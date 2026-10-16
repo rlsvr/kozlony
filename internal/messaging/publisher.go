@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	natsio "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rlsvr/blazesse"
+	"github.com/rlsvr/inas/pkg/registry"
 
 	"github.com/rlsvr/kozlony/internal/messaging/commands"
 	"github.com/rlsvr/kozlony/internal/messaging/events"
@@ -30,20 +32,36 @@ type Publisher struct {
 	liveCh      chan liveMsg
 	liveStop    chan struct{}
 
-	topicMu     sync.Mutex
-	topicCounts map[string]int
-	topicSubs   map[string]*natsio.Subscription
+	topicReg  *registry.Registry[string, uint64]
+	nextSubID atomic.Uint64
+	topicSubs sync.Map // string -> *natsio.Subscription
 }
 
 // NewPublisher initializes a new Publisher embedding the provided Client.
 func NewPublisher(client *Client) *Publisher {
 	p := &Publisher{
-		Client:      client,
-		liveCh:      make(chan liveMsg, 65536),
-		liveStop:    make(chan struct{}),
-		topicCounts: make(map[string]int),
-		topicSubs:   make(map[string]*natsio.Subscription),
+		Client:   client,
+		liveCh:   make(chan liveMsg, 65536),
+		liveStop: make(chan struct{}),
 	}
+
+	p.topicReg = registry.New(
+		context.Background(),
+		registry.Options{
+			ReconfigInterval:  10 * time.Millisecond,
+			ReconfigBatchSize: 256,
+			Debounce:          5 * time.Second, // 5s warm retention TTL for rapid client view-switching
+			ReconfigWait:      false,
+		},
+		registry.Hooks[string, uint64]{
+			OnActive: func(topic string) {
+				p.ensureNATSSubscribed(topic)
+			},
+			OnInactive: func(topic string) {
+				p.ensureNATSUnsubscribed(topic)
+			},
+		},
+	)
 
 	p.broadcaster = blazesse.NewBroadcaster(
 		blazesse.NewEngineLockFree(
@@ -76,50 +94,25 @@ func (p *Publisher) SubscribeTopic(topic string) (blazesse.Subscriber, func(), e
 		topic = DefaultGroupID
 	}
 
-	p.topicMu.Lock()
-	count := p.topicCounts[topic]
-	p.topicCounts[topic] = count + 1
-
-	if count == 0 {
-		if err := p.ensureNATSSubscribed(topic); err != nil {
-			p.topicCounts[topic]--
-			if p.topicCounts[topic] == 0 {
-				delete(p.topicCounts, topic)
-			}
-			p.topicMu.Unlock()
-			return nil, nil, err
-		}
-	}
-	p.topicMu.Unlock()
-
 	bSub, bUnsub := p.broadcaster.Subscribe(topic)
+
+	subID := p.nextSubID.Add(1)
+	regUnsub := p.topicReg.Register([]string{topic}, subID)
 
 	var unsubOnce sync.Once
 	teardown := func() {
 		unsubOnce.Do(func() {
 			bUnsub()
-
-			p.topicMu.Lock()
-			remaining := p.topicCounts[topic] - 1
-			if remaining <= 0 {
-				delete(p.topicCounts, topic)
-				if sub, ok := p.topicSubs[topic]; ok {
-					_ = sub.Unsubscribe()
-					delete(p.topicSubs, topic)
-				}
-			} else {
-				p.topicCounts[topic] = remaining
-			}
-			p.topicMu.Unlock()
+			regUnsub()
 		})
 	}
 
 	return bSub, teardown, nil
 }
 
-func (p *Publisher) ensureNATSSubscribed(topic string) error {
+func (p *Publisher) ensureNATSSubscribed(topic string) {
 	if p.Client == nil || p.Conn() == nil || p.Conn().Raw() == nil {
-		return nil
+		return
 	}
 	prefix := p.cfg.LivePrefix
 	if prefix == "" {
@@ -133,11 +126,17 @@ func (p *Publisher) ensureNATSSubscribed(topic string) error {
 			p.broadcaster.Publish(targetTopic, blazesse.TextFrame(string(m.Data)))
 		}
 	})
-	if err != nil {
-		return fmt.Errorf("subscribe to live NATS topic %q: %w", subject, err)
+	if err == nil {
+		p.topicSubs.Store(topic, sub)
 	}
-	p.topicSubs[topic] = sub
-	return nil
+}
+
+func (p *Publisher) ensureNATSUnsubscribed(topic string) {
+	if val, ok := p.topicSubs.LoadAndDelete(topic); ok {
+		if sub, ok := val.(*natsio.Subscription); ok {
+			_ = sub.Unsubscribe()
+		}
+	}
 }
 
 func (p *Publisher) publishLiveAsync(subject string, data []byte) {
@@ -324,13 +323,16 @@ func (p *Publisher) Close() {
 		return
 	}
 
-	p.topicMu.Lock()
-	for topic, sub := range p.topicSubs {
-		_ = sub.Unsubscribe()
-		delete(p.topicSubs, topic)
+	if p.topicReg != nil {
+		_ = p.topicReg.Close()
 	}
-	p.topicCounts = make(map[string]int)
-	p.topicMu.Unlock()
+	p.topicSubs.Range(func(key, value any) bool {
+		if sub, ok := value.(*natsio.Subscription); ok {
+			_ = sub.Unsubscribe()
+		}
+		p.topicSubs.Delete(key)
+		return true
+	})
 
 	if p.liveStop != nil {
 		select {

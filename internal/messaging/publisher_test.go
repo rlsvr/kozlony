@@ -107,3 +107,48 @@ func TestPublisher_SubscribeFilteredEvents(t *testing.T) {
 		t.Fatal("timed out waiting for event on channel")
 	}
 }
+
+func TestPublisher_DebouncedLifecycle(t *testing.T) {
+	pub := messaging.NewPublisher(nil)
+	defer pub.Close()
+
+	topic := "debounced-topic"
+
+	// Subscribe first client
+	sub1, unsub1, err := pub.SubscribeTopic(topic)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Unsubscribe first client - topic enters 5s debounce window
+	unsub1()
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Second client subscribes within debounce window
+	sub2, unsub2, err := pub.SubscribeTopic(topic)
+	if err != nil {
+		t.Fatalf("unexpected error on second subscribe: %v", err)
+	}
+	defer unsub2()
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Publish frame
+	frame := blazesse.TextFrame(`{"msg":"revived"}`)
+	pub.Broadcaster().Publish(topic, frame)
+
+	select {
+	case <-sub2.Recv():
+		batch := sub2.Fetch()
+		if len(batch) == 0 || batch[0].String() != "data: {\"msg\":\"revived\"}\n\n" {
+			t.Fatalf("unexpected batch in sub2: %v", batch)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for sub2 to receive frame")
+	}
+
+	_ = sub1
+}

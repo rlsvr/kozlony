@@ -59,3 +59,8 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/rlsvr/inas => /media/storage/projects/inas
+
+replace github.com/rlsvr/blazesse => /media/storage/projects/sse
+
