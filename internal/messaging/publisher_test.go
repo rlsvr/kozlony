@@ -40,6 +40,9 @@ func TestPublisher_SubscribeTopicLifecycle(t *testing.T) {
 		t.Fatal("expected non-nil subscriber 2")
 	}
 
+	// Wait for actor reconfig interval (10ms) to incorporate into snapshot
+	time.Sleep(20 * time.Millisecond)
+
 	// 3. Publish frame to topic via Broadcaster
 	frame := blazesse.TextFrame(`{"msg":"hello topic"}`)
 	pub.Broadcaster().Publish(topic, frame)
@@ -86,6 +89,9 @@ func TestPublisher_SubscribeFilteredEvents(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer cleanup()
+
+	// Wait for actor reconfig interval (10ms) to incorporate into snapshot
+	time.Sleep(20 * time.Millisecond)
 
 	// Publish to threadID topic
 	payload := `{"id":"evt-1","root_id":"01923f12-0000-7000-8000-000000000099"}`

@@ -47,9 +47,9 @@ func NewPublisher(client *Client) *Publisher {
 
 	p.broadcaster = blazesse.NewBroadcaster(
 		blazesse.NewEngineLockFree(
-			blazesse.WithReconfigInterval(15*time.Millisecond),
-			blazesse.WithReconfigBatchSize(128),
-			blazesse.WithReconfigWait(true),
+			blazesse.WithReconfigInterval(10*time.Millisecond),
+			blazesse.WithReconfigBatchSize(256),
+			blazesse.WithReconfigWait(false),
 		),
 		blazesse.WithDeliveryMode(blazesse.DeliveryFIFO),
 		blazesse.WithFIFOBufferSize(512),
