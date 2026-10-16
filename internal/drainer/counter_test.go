@@ -673,7 +673,7 @@ func TestCounter_RunWorkerPartitionDistribution(t *testing.T) {
 	ctx3, cancel3 := context.WithCancel(context.Background())
 	mockPF.EXPECT().
 		FetchPartition(2, 10, gomock.Any()).
-		DoAndReturn(func(p, b int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+		DoAndReturn(func(_, _ int, _ ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
 			cancel3()
 			return batchOf(), nil
 		}).
@@ -687,4 +687,3 @@ func TestCounter_RunWorkerPartitionDistribution(t *testing.T) {
 }
 
 func ptrTo(s string) *string { return &s }
-

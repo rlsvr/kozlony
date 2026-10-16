@@ -62,29 +62,33 @@ func PartitionForGroup(groupID string, numPartitions int) int {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(groupID))
+	//nolint:gosec // numPartitions is validated > 1 and fits in uint32
 	return int(h.Sum32() % uint32(numPartitions))
+}
+
+// SubjectLiveTopic returns the ephemeral Core NATS topic for any live stream
+// (feed board or thread conversation).
+func SubjectLiveTopic(prefix, topic string) string {
+	if prefix == "" {
+		prefix = DefaultLivePrefix
+	}
+	if topic == "" {
+		topic = DefaultGroupID
+	}
+	return fmt.Sprintf("%s.%s", prefix, topic)
 }
 
 // SubjectLiveFeed returns the ephemeral Core NATS topic for board feed events.
 func SubjectLiveFeed(prefix, groupID string) string {
-	if prefix == "" {
-		prefix = DefaultLivePrefix
-	}
-	if groupID == "" {
-		groupID = DefaultGroupID
-	}
-	return fmt.Sprintf("%s.%s.feed", prefix, groupID)
+	return SubjectLiveTopic(prefix, groupID)
 }
 
 // SubjectLiveThread returns the ephemeral Core NATS topic for a specific thread's events.
 func SubjectLiveThread(prefix, groupID, threadRootID string) string {
-	if prefix == "" {
-		prefix = DefaultLivePrefix
+	if threadRootID != "" {
+		return SubjectLiveTopic(prefix, threadRootID)
 	}
-	if groupID == "" {
-		groupID = DefaultGroupID
-	}
-	return fmt.Sprintf("%s.%s.thread.%s", prefix, groupID, threadRootID)
+	return SubjectLiveTopic(prefix, groupID)
 }
 
 // PartitionForThread deterministically computes the partition index for an interaction.

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	qpnats "github.com/rlsvr/hirnok/pkg/nats"
 )
 
 // CounterConsumer embeds *Client and manages N durable pull consumers, one per counter partition.
@@ -44,16 +44,14 @@ func NewCounterConsumer(ctx context.Context, client *Client, numPartitions int) 
 
 	consumers := make([]jetstream.Consumer, numPartitions)
 	for p := 0; p < numPartitions; p++ {
-		consumerCfg := jetstream.ConsumerConfig{
-			Durable:       fmt.Sprintf("%s-%d", client.cfg.NATSCounterConsumerName, p),
-			FilterSubject: SubjectCounterPartition(p),
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			DeliverPolicy: jetstream.DeliverAllPolicy,
-			AckWait:       client.cfg.NATSAckWait,
-			MaxAckPending: maxAckPendingPerPart,
-			MaxDeliver:    20,
-			BackOff:       []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, time.Second, 2 * time.Second},
+		consumerCfg := qpnats.DefaultConsumerConfig(fmt.Sprintf("%s-%d", client.cfg.NATSCounterConsumerName, p))
+		consumerCfg.FilterSubject = SubjectCounterPartition(p)
+		if client.cfg.NATSAckWait > 0 {
+			consumerCfg.AckWait = client.cfg.NATSAckWait
 		}
+		consumerCfg.MaxAckPending = maxAckPendingPerPart
+		consumerCfg.MaxDeliver = 20
+		consumerCfg.BackOff = []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, time.Second, 2 * time.Second}
 
 		cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
 		if err != nil {

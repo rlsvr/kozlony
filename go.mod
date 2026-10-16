@@ -13,7 +13,10 @@ require (
 	github.com/labstack/echo/v4 v4.16.0
 	github.com/nats-io/nats.go v1.54.0
 	github.com/oapi-codegen/runtime v1.7.0
-	github.com/rlsvr/hirnok v0.0.0-20260517145707-feb44812a52d
+	github.com/rlsvr/blazesse v0.0.0-20261016040715-37d03784b8f2
+	github.com/rlsvr/blazesse-echo v0.0.0-20261016040825-c7686e98b172
+	github.com/rlsvr/hirnok v0.0.0-20261015212726-8775a5a6726e
+	github.com/rlsvr/inas v0.0.0-20261016034335-a59c88b503f7
 	github.com/rs/zerolog v1.35.1
 	github.com/sethvargo/go-envconfig v1.4.3
 	github.com/stretchr/testify v1.11.1
@@ -49,10 +52,10 @@ require (
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

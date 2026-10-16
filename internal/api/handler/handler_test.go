@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/rlsvr/blazesse"
 
 	"github.com/rlsvr/kozlony/internal/api/handler"
 	"github.com/rlsvr/kozlony/internal/api/server"
@@ -26,14 +27,15 @@ import (
 const (
 	testAuthorAlice = "Alice"
 	testGroupRoot   = "root"
+	testGroupDev    = "dev"
 )
 
 type mockPublisher struct {
-	lastCreatedEvent     *events.InteractionCreatedEvent
-	lastEditedEvent      *events.InteractionEditedEvent
-	editedPublishes      int
-	lastFilteredGroupID  *string
-	lastFilteredRootID   *uuid.UUID
+	lastCreatedEvent       *events.InteractionCreatedEvent
+	lastEditedEvent        *events.InteractionEditedEvent
+	editedPublishes        int
+	lastFilteredGroupID    *string
+	lastFilteredRootID     *uuid.UUID
 	filteredSubscribeCalls int
 }
 
@@ -196,7 +198,7 @@ func TestCreateInteraction(t *testing.T) {
 	h := handler.New(mockPub, nil, nil)
 
 	title := "My first post"
-	group := "dev"
+	group := testGroupDev
 	payload := server.CreateInteractionRequest{
 		Author:  testAuthorAlice,
 		Body:    "Hello world!",
@@ -815,3 +817,60 @@ func TestCreateInteraction_ParentNotFound(t *testing.T) {
 	}
 }
 
+type mockBroadcasterPublisher struct {
+	mockPublisher
+	broadcaster *blazesse.Broadcaster
+}
+
+func (m *mockBroadcasterPublisher) Broadcaster() *blazesse.Broadcaster {
+	return m.broadcaster
+}
+
+func TestEventsInteractions_WithBroadcaster(t *testing.T) {
+	b := blazesse.NewBroadcaster(
+		blazesse.WithHeartbeat(0, 0),
+		blazesse.WithDeliveryMode(blazesse.DeliveryFIFO),
+	)
+	defer func() {
+		_ = b.Close()
+	}()
+
+	pub := &mockBroadcasterPublisher{
+		broadcaster: b,
+	}
+	repo := newMockRepository()
+	h := handler.New(pub, repo, nil)
+
+	e := echo.New()
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rootUUID := uuid.Must(uuid.NewV7())
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/v1/interactions/events?root_id="+rootUUID.String(), nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = h.EventsInteractions(c, server.EventsInteractionsParams{RootId: &rootUUID})
+	}()
+
+	// Wait for subscription to register
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish to the thread topic
+	b.Publish(rootUUID.String(), blazesse.EventFrame("created", `{"id":"123"}`))
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Errorf("expected text/event-stream, got %s", rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: created\ndata: {\"id\":\"123\"}\n\n") {
+		t.Fatalf("expected event frame in SSE body, got: %q", body)
+	}
+}

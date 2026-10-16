@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,31 +14,31 @@ import (
 
 type dummyHandler struct{}
 
-func (d *dummyHandler) GetHealthz(ctx echo.Context) error {
+func (*dummyHandler) GetHealthz(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, server.HealthResponse{Status: "ok"})
 }
 
-func (d *dummyHandler) GetReadyz(ctx echo.Context) error {
+func (*dummyHandler) GetReadyz(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, server.HealthResponse{Status: "ready"})
 }
 
-func (d *dummyHandler) ListInteractions(ctx echo.Context, params server.ListInteractionsParams) error {
+func (*dummyHandler) ListInteractions(ctx echo.Context, _ server.ListInteractionsParams) error {
 	return ctx.NoContent(http.StatusOK)
 }
 
-func (d *dummyHandler) CreateInteraction(ctx echo.Context, params server.CreateInteractionParams) error {
+func (*dummyHandler) CreateInteraction(ctx echo.Context, _ server.CreateInteractionParams) error {
 	return ctx.NoContent(http.StatusCreated)
 }
 
-func (d *dummyHandler) EventsInteractions(ctx echo.Context, params server.EventsInteractionsParams) error {
+func (*dummyHandler) EventsInteractions(ctx echo.Context, _ server.EventsInteractionsParams) error {
 	return ctx.NoContent(http.StatusOK)
 }
 
-func (d *dummyHandler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error {
+func (*dummyHandler) GetInteraction(ctx echo.Context, _ openapi_types.UUID) error {
 	return ctx.NoContent(http.StatusOK)
 }
 
-func (d *dummyHandler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) error {
+func (*dummyHandler) UpdateInteraction(ctx echo.Context, _ openapi_types.UUID) error {
 	return ctx.NoContent(http.StatusOK)
 }
 
@@ -49,8 +50,10 @@ func TestServer_InitializationAndPprofEndpoints(t *testing.T) {
 		t.Fatal("expected non-nil echo server")
 	}
 
+	reqCtx := context.Background()
+
 	// Verify standard API routes
-	req := httptest.NewRequest(http.MethodGet, "/v1/healthz", nil)
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/v1/healthz", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -66,7 +69,7 @@ func TestServer_InitializationAndPprofEndpoints(t *testing.T) {
 
 	for _, ep := range pprofEndpoints {
 		t.Run("pprof_"+ep, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, ep, nil)
+			r := httptest.NewRequestWithContext(reqCtx, http.MethodGet, ep, nil)
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, r)
 			if w.Code != http.StatusOK {
@@ -76,7 +79,7 @@ func TestServer_InitializationAndPprofEndpoints(t *testing.T) {
 	}
 
 	// Trigger 404 to exercise the error branch in RequestLogger
-	errReq := httptest.NewRequest(http.MethodGet, "/not-found-route-triggering-error", nil)
+	errReq := httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/not-found-route-triggering-error", nil)
 	errRec := httptest.NewRecorder()
 	e.ServeHTTP(errRec, errReq)
 	if errRec.Code != http.StatusNotFound {

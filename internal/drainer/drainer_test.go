@@ -415,7 +415,7 @@ func TestDrainer_RunWorkerPartitionDistribution(t *testing.T) {
 	ctx4, cancel4 := context.WithCancel(context.Background())
 	mockPF.EXPECT().
 		FetchPartition(3, 10, gomock.Any()).
-		DoAndReturn(func(p, b int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+		DoAndReturn(func(_, _ int, _ ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
 			cancel4()
 			ch := make(chan jetstream.Msg)
 			close(ch)

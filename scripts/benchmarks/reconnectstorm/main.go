@@ -38,7 +38,7 @@ func main() {
 	start := time.Now()
 	for i := 0; i < *concurrency; i++ {
 		wg.Add(1)
-		go func(id int) {
+		go func(_ int) {
 			defer wg.Done()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, *targetURL+"/v1/interactions/events?group_id=root", nil)
 			if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/nats-io/nats.go/jetstream"
+	qpnats "github.com/rlsvr/hirnok/pkg/nats"
 )
 
 // PartitionedDrainerConsumer embeds *Client and manages N durable pull consumers, one per partition.
@@ -42,14 +43,12 @@ func NewPartitionedDrainerConsumer(ctx context.Context, client *Client, numParti
 
 	consumers := make([]jetstream.Consumer, numPartitions)
 	for p := 0; p < numPartitions; p++ {
-		consumerCfg := jetstream.ConsumerConfig{
-			Durable:       fmt.Sprintf("%s-%d", client.cfg.NATSConsumerName, p),
-			FilterSubject: SubjectIngestPartition(p),
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			DeliverPolicy: jetstream.DeliverAllPolicy,
-			AckWait:       client.cfg.NATSAckWait,
-			MaxAckPending: maxAckPendingPerPart,
+		consumerCfg := qpnats.DefaultConsumerConfig(fmt.Sprintf("%s-%d", client.cfg.NATSConsumerName, p))
+		consumerCfg.FilterSubject = SubjectIngestPartition(p)
+		if client.cfg.NATSAckWait > 0 {
+			consumerCfg.AckWait = client.cfg.NATSAckWait
 		}
+		consumerCfg.MaxAckPending = maxAckPendingPerPart
 
 		cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
 		if err != nil {
@@ -112,14 +111,12 @@ func NewDrainerConsumer(ctx context.Context, client *Client) (*DrainerConsumer, 
 		maxAckPending = 20000
 	}
 
-	consumerCfg := jetstream.ConsumerConfig{
-		Durable:       client.cfg.NATSConsumerName,
-		FilterSubject: SubjectIngestFilter(),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckWait:       client.cfg.NATSAckWait,
-		MaxAckPending: maxAckPending,
+	consumerCfg := qpnats.DefaultConsumerConfig(client.cfg.NATSConsumerName)
+	consumerCfg.FilterSubject = SubjectIngestFilter()
+	if client.cfg.NATSAckWait > 0 {
+		consumerCfg.AckWait = client.cfg.NATSAckWait
 	}
+	consumerCfg.MaxAckPending = maxAckPending
 
 	cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
 	if err != nil {

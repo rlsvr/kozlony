@@ -19,10 +19,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type LatencyProbe struct {
-	sentTime time.Time
-}
-
 func main() {
 	targetURL := flag.String("url", "http://localhost:8080", "Base URL")
 	numProbes := flag.Int("probes", 50, "Number of probe messages to send")
@@ -46,7 +42,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to connect to SSE: %v\n", err)
 		os.Exit(1)
 	}
-	defer sseResp.Body.Close()
+	defer func() {
+		_ = sseResp.Body.Close()
+	}()
 
 	if sseResp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "SSE returned non-200: %d\n", sseResp.StatusCode)
@@ -107,7 +105,7 @@ func main() {
 			"body":     fmt.Sprintf("E2E latency probe_nano:%d", sentNano),
 		}
 		data, _ := json.Marshal(payload)
-		req, _ := http.NewRequest(http.MethodPost, *targetURL+"/v1/interactions", bytes.NewReader(data))
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, *targetURL+"/v1/interactions", bytes.NewReader(data))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", uuid.New().String())
 
@@ -142,13 +140,13 @@ func main() {
 	p50 := probeDelays[len(probeDelays)*50/100]
 	p90 := probeDelays[len(probeDelays)*90/100]
 	p99 := probeDelays[len(probeDelays)*99/100]
-	min := probeDelays[0]
-	max := probeDelays[len(probeDelays)-1]
+	minLatency := probeDelays[0]
+	maxLatency := probeDelays[len(probeDelays)-1]
 
 	fmt.Printf("Received: %d/%d probes\n", len(probeDelays), *numProbes)
-	fmt.Printf("Min:      %.2f ms\n", float64(min.Microseconds())/1000.0)
+	fmt.Printf("Min:      %.2f ms\n", float64(minLatency.Microseconds())/1000.0)
 	fmt.Printf("P50:      %.2f ms\n", float64(p50.Microseconds())/1000.0)
 	fmt.Printf("P90:      %.2f ms\n", float64(p90.Microseconds())/1000.0)
 	fmt.Printf("P99:      %.2f ms\n", float64(p99.Microseconds())/1000.0)
-	fmt.Printf("Max:      %.2f ms\n", float64(max.Microseconds())/1000.0)
+	fmt.Printf("Max:      %.2f ms\n", float64(maxLatency.Microseconds())/1000.0)
 }

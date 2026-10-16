@@ -19,7 +19,6 @@ import (
 type Client struct {
 	*qpnats.JetStream
 	cfg       *config.Config
-	conn      *qpnats.Conn
 	mu        sync.Mutex
 	consumers []*qpnats.Consumer
 }
@@ -50,7 +49,6 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	return &Client{
 		JetStream: js,
 		cfg:       cfg,
-		conn:      conn,
 	}, nil
 }
 
@@ -140,15 +138,16 @@ func (c *Client) StartPullConsumer(
 
 // Conn returns the underlying hirnok Conn.
 func (c *Client) Conn() *qpnats.Conn {
-	if c == nil {
+	if c == nil || c.JetStream == nil {
 		return nil
 	}
-	return c.conn
+	return c.JetStream.Conn()
 }
 
 // Ping checks whether the NATS connection is active.
 func (c *Client) Ping(_ context.Context) error {
-	if c == nil || c.conn == nil || c.conn.Raw() == nil || !c.conn.Raw().IsConnected() {
+	conn := c.Conn()
+	if conn == nil || conn.Raw() == nil || !conn.Raw().IsConnected() {
 		return errors.New("nats client not connected")
 	}
 	return nil
@@ -156,7 +155,7 @@ func (c *Client) Ping(_ context.Context) error {
 
 // PublishDLQ publishes a poison or unprocessable message to the dead letter queue stream.
 func (c *Client) PublishDLQ(ctx context.Context, originalSubject string, data []byte, reason string) error {
-	if c == nil || c.conn == nil {
+	if c.Conn() == nil {
 		return errors.New("nats client not connected")
 	}
 
@@ -181,7 +180,7 @@ func (c *Client) Close() {
 	c.consumers = nil
 	c.mu.Unlock()
 
-	if c.conn != nil {
-		c.conn.Close()
+	if conn := c.Conn(); conn != nil {
+		conn.Close()
 	}
 }

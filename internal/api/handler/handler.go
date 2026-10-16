@@ -5,7 +5,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +13,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/nats-io/nats.go/jetstream"
 	openapi_types "github.com/oapi-codegen/runtime/types"
+	"github.com/rlsvr/blazesse"
+	blazesseEcho "github.com/rlsvr/blazesse-echo"
 	"github.com/rs/zerolog/log"
 
 	"github.com/rlsvr/kozlony/internal/api/server"
@@ -25,6 +26,7 @@ import (
 var _ server.ServerInterface = (*Handler)(nil)
 
 const (
+	defaultGroupID         = "root"
 	errInteractionNotFound = "interaction not found"
 	maxTitleLength         = 255
 	maxBodyLength          = 65535
@@ -38,6 +40,18 @@ type Publisher interface {
 	PublishInteractionEdited(ctx context.Context, evt *events.InteractionEditedEvent) (*jetstream.PubAck, error)
 	SubscribeEvents(ctx context.Context, groupID *string) (<-chan []byte, func(), error)
 	SubscribeFilteredEvents(ctx context.Context, groupID *string, rootID *uuid.UUID) (<-chan []byte, func(), error)
+}
+
+// TopicSubscriber is an optional interface implemented by publishers that manage
+// dynamic NATS topic subscriptions and blazesse.Subscriber mailboxes directly.
+type TopicSubscriber interface {
+	SubscribeTopic(topic string) (blazesse.Subscriber, func(), error)
+}
+
+// BroadcasterProvider is an optional interface implemented by publishers that support
+// direct blazesse.Broadcaster zero-allocation pub/sub.
+type BroadcasterProvider interface {
+	Broadcaster() *blazesse.Broadcaster
 }
 
 // Handler implements server.ServerInterface.
@@ -114,7 +128,7 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 		}
 	}
 
-	groupID := "root"
+	groupID := defaultGroupID
 	if req.GroupId != nil && *req.GroupId != "" {
 		groupID = *req.GroupId
 	}
@@ -299,7 +313,7 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 // ListInteractions handles listing root posts for the main feed with cursor pagination.
 func (h *Handler) ListInteractions(ctx echo.Context, params server.ListInteractionsParams) error {
 	reqCtx := ctx.Request().Context()
-	groupID := "root"
+	groupID := defaultGroupID
 	if params.GroupId != nil && *params.GroupId != "" {
 		groupID = *params.GroupId
 	}
@@ -460,50 +474,112 @@ func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error 
 
 // EventsInteractions streams live interaction events to connected clients via Server-Sent Events (SSE).
 func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInteractionsParams) error {
-	ctx.Response().Header().Set("Content-Type", "text/event-stream")
-	ctx.Response().Header().Set("Cache-Control", "no-cache")
-	ctx.Response().Header().Set("Connection", "keep-alive")
-	ctx.Response().Header().Set("Access-Control-Allow-Origin", "*")
-	ctx.Response().WriteHeader(http.StatusOK)
-	ctx.Response().Flush()
-
 	if h.publisher == nil {
 		return nil
 	}
 
-	reqCtx := ctx.Request().Context()
 	var rootUUID *uuid.UUID
 	if params.RootId != nil {
 		rootUUID = params.RootId
 	}
-	msgChan, cancelSub, err := h.publisher.SubscribeFilteredEvents(reqCtx, params.GroupId, rootUUID)
+
+	targetTopic := defaultGroupID
+	if params.GroupId != nil && *params.GroupId != "" {
+		targetTopic = *params.GroupId
+	}
+	if rootUUID != nil {
+		targetTopic = rootUUID.String()
+	}
+
+	// 1. If publisher provides TopicSubscriber, subscribe with dynamic NATS topic lifecycle
+	if ts, ok := h.publisher.(TopicSubscriber); ok {
+		sub, unsub, err := ts.SubscribeTopic(targetTopic)
+		if err == nil {
+			return h.streamSubscriber(ctx, sub, unsub)
+		}
+	}
+
+	// 2. If publisher provides a blazesse.Broadcaster, use zero-allocation sharded broadcasting
+	if bp, ok := h.publisher.(BroadcasterProvider); ok && bp.Broadcaster() != nil {
+		sub, unsub := bp.Broadcaster().Subscribe(targetTopic)
+		return h.streamSubscriber(ctx, sub, unsub)
+	}
+
+	// 3. Fallback for mock publishers or non-broadcaster implementations
+	return h.streamFallback(ctx, params.GroupId, rootUUID)
+}
+
+func (*Handler) streamSubscriber(ctx echo.Context, sub blazesse.Subscriber, unsub func()) error {
+	defer unsub()
+
+	stream, err := blazesseEcho.Upgrade(ctx,
+		blazesse.WithWriteTimeout(3*time.Second),
+		blazesse.WithHeartbeat(15*time.Second, 5*time.Second),
+		blazesse.WithHeader("Access-Control-Allow-Origin", "*"),
+	)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		_ = stream.Close()
+	}()
+
+	for {
+		select {
+		case <-stream.Done():
+			return nil
+		case <-sub.Done():
+			_ = stream.SendBatch(sub.Fetch())
+			return nil
+		case <-sub.Recv():
+			batch := sub.Fetch()
+			if len(batch) == 0 {
+				if sub.IsClosed() {
+					return nil
+				}
+				continue
+			}
+			if err := stream.SendBatch(batch); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+func (h *Handler) streamFallback(ctx echo.Context, groupID *string, rootUUID *uuid.UUID) error {
+	reqCtx := ctx.Request().Context()
+	msgChan, cancelSub, err := h.publisher.SubscribeFilteredEvents(reqCtx, groupID, rootUUID)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to subscribe to NATS events for SSE")
 		return nil
 	}
 	defer cancelSub()
 
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
+	stream, err := blazesseEcho.Upgrade(ctx,
+		blazesse.WithWriteTimeout(3*time.Second),
+		blazesse.WithHeartbeat(15*time.Second, 5*time.Second),
+		blazesse.WithHeader("Access-Control-Allow-Origin", "*"),
+	)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		_ = stream.Close()
+	}()
 
 	for {
 		select {
-		case <-reqCtx.Done():
+		case <-stream.Done():
 			return nil
-		case <-heartbeat.C:
-			if _, err := fmt.Fprintf(ctx.Response(), ":ping\n\n"); err != nil {
-				return nil
-			}
-			ctx.Response().Flush()
 		case msg, ok := <-msgChan:
 			if !ok {
 				return nil
 			}
-			if _, err := fmt.Fprintf(ctx.Response(), "data: %s\n\n", msg); err != nil {
+			if err := stream.Send(blazesse.TextFrame(string(msg))); err != nil {
 				return nil
 			}
 
-			// Micro-drain: write all currently buffered events before issuing a single TCP flush syscall
+			// Micro-drain: write all currently buffered events before issuing a single TCP flush
 		DRAIN:
 			for {
 				select {
@@ -511,15 +587,13 @@ func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInter
 					if !ok {
 						return nil
 					}
-					if _, err := fmt.Fprintf(ctx.Response(), "data: %s\n\n", nextMsg); err != nil {
+					if err := stream.Send(blazesse.TextFrame(string(nextMsg))); err != nil {
 						return nil
 					}
 				default:
 					break DRAIN
 				}
 			}
-
-			ctx.Response().Flush()
 		}
 	}
 }

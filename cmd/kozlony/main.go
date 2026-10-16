@@ -96,6 +96,7 @@ func main() {
 	var msgPublisher *messaging.Publisher
 	if msgClient != nil {
 		msgPublisher = messaging.NewPublisher(msgClient)
+		defer msgPublisher.Close()
 		pub = msgPublisher
 	}
 

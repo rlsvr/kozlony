@@ -99,14 +99,19 @@ func TestSubjectGenerators(t *testing.T) {
 			expected: "INGEST.p.*",
 		},
 		{
+			name:     "SubjectLiveTopic",
+			got:      messaging.SubjectLiveTopic("LIVE", "dev"),
+			expected: "LIVE.dev",
+		},
+		{
 			name:     "SubjectLiveFeed",
 			got:      messaging.SubjectLiveFeed("LIVE", "dev"),
-			expected: "LIVE.dev.feed",
+			expected: "LIVE.dev",
 		},
 		{
 			name:     "SubjectLiveThread",
 			got:      messaging.SubjectLiveThread("LIVE", "dev", "01923f12-0000-7000-8000-000000000001"),
-			expected: "LIVE.dev.thread.01923f12-0000-7000-8000-000000000001",
+			expected: "LIVE.01923f12-0000-7000-8000-000000000001",
 		},
 	}
 

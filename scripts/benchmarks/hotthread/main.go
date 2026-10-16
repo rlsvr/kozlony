@@ -45,7 +45,7 @@ func main() {
 		"body":     "Contention root target post",
 	}
 	rootData, _ := json.Marshal(rootPayload)
-	req, _ := http.NewRequest(http.MethodPost, *targetURL+"/v1/interactions", bytes.NewReader(rootData))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, *targetURL+"/v1/interactions", bytes.NewReader(rootData))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", uuid.New().String())
 

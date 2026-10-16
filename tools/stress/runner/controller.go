@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rlsvr/hirnok/pkg/queue"
-	"github.com/rlsvr/hirnok/pkg/worker"
+	"github.com/rlsvr/inas/pkg/queue"
+	"github.com/rlsvr/inas/pkg/worker"
 	"golang.org/x/time/rate"
 
 	"github.com/rlsvr/kozlony/tools/status"
