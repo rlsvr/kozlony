@@ -15,6 +15,9 @@ type InteractionEditedEvent struct {
 	// Interaction UUID.
 	ID string `json:"id"`
 
+	// Thread root interaction UUID (for replies).
+	RootID InteractionEditedEventRootID `json:"root_id,omitempty"`
+
 	// Updated title (for root posts).
 	Title InteractionEditedEventTitle `json:"title,omitempty"`
 
@@ -24,6 +27,9 @@ type InteractionEditedEvent struct {
 	// Incremented interaction version number.
 	Version int `json:"version"`
 }
+
+// Thread root interaction UUID (for replies).
+type InteractionEditedEventRootID *string
 
 // Updated title (for root posts).
 type InteractionEditedEventTitle *string

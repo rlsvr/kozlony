@@ -105,12 +105,15 @@ type InteractionDetail struct {
 
 // InteractionEditedEvent Event emitted and streamed via SSE when an interaction is edited.
 type InteractionEditedEvent struct {
-	Body      string             `json:"body"`
-	GroupId   string             `json:"group_id"`
-	Id        openapi_types.UUID `json:"id"`
-	Title     *string            `json:"title,omitempty"`
-	UpdatedAt time.Time          `json:"updated_at"`
-	Version   int                `json:"version"`
+	Body    string             `json:"body"`
+	GroupId string             `json:"group_id"`
+	Id      openapi_types.UUID `json:"id"`
+
+	// RootId Thread root UUID if this is a reply.
+	RootId    *openapi_types.UUID `json:"root_id,omitempty"`
+	Title     *string             `json:"title,omitempty"`
+	UpdatedAt time.Time           `json:"updated_at"`
+	Version   int                 `json:"version"`
 }
 
 // InteractionFeedResponse defines model for InteractionFeedResponse.

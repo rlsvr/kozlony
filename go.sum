@@ -93,14 +93,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/rivo/uniseg v0.2.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
 github.com/rivo/uniseg v0.4.7/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=
-github.com/rlsvr/blazesse v0.0.0-20261016040715-37d03784b8f2 h1:d6kWMmPymzJfrbQUv4A7oryrlcP6TKZMNz+Ymh0G8ms=
-github.com/rlsvr/blazesse v0.0.0-20261016040715-37d03784b8f2/go.mod h1:MuSTFYadBkSwK3s/6G3VAGaf4QqCwC1NWSHtpm2x0kM=
 github.com/rlsvr/blazesse-echo v0.0.0-20261016040825-c7686e98b172 h1:KFi+ETfMTifMpTUgi5NTdgi/BIdTEeMAvCXtf7AHx4o=
 github.com/rlsvr/blazesse-echo v0.0.0-20261016040825-c7686e98b172/go.mod h1:9P88tqJGoQyGi1dQvo0EOISfpW62aPmuCAyr6O7vmc8=
-github.com/rlsvr/hirnok v0.0.0-20261015212726-8775a5a6726e h1:RJz7BU74ubl5O9WhJLudz5OrGU3i0j5lYIst9Y9jT+0=
-github.com/rlsvr/hirnok v0.0.0-20261015212726-8775a5a6726e/go.mod h1:7fo+Z2n/CnlDkwhpdsbVQWy1m2rdwr68H5cZRP66q4s=
-github.com/rlsvr/inas v0.0.0-20261016034335-a59c88b503f7 h1:lmT4MVDHUNf6SfDRk/9dFnK1rZLc4gaEZCR/etNzfFs=
-github.com/rlsvr/inas v0.0.0-20261016034335-a59c88b503f7/go.mod h1:AWDKbq2YqfICn7e5xDcYkZDXjdXowzDcR5XNSEnem3w=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjRBZyWFQ=
 github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=

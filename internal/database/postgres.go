@@ -686,7 +686,7 @@ func (r *InteractionRepository) ListFeed(ctx context.Context, groupID string, li
 			SELECT id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version
 			FROM interactions
 			WHERE group_id = $1 AND parent_id IS NULL AND created_at < $2
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, id DESC
 			LIMIT $3;
 		`
 		rows, err = r.readPool.Query(ctx, query, groupID, *before, limit)
@@ -695,7 +695,7 @@ func (r *InteractionRepository) ListFeed(ctx context.Context, groupID string, li
 			SELECT id, group_id, root_id, parent_id, title, body, author, created_at, updated_at, reply_count, depth, version
 			FROM interactions
 			WHERE group_id = $1 AND parent_id IS NULL
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, id DESC
 			LIMIT $2;
 		`
 		rows, err = r.readPool.Query(ctx, query, groupID, limit)

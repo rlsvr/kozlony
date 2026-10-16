@@ -23,6 +23,11 @@
       "maxLength": 64,
       "description": "Board or group identifier."
     },
+    "root_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Thread root interaction UUID (for replies)."
+    },
     "title": {
       "type": ["string", "null"],
       "maxLength": 255,

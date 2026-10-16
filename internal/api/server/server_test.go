@@ -60,7 +60,7 @@ func TestServer_InitializationAndPprofEndpoints(t *testing.T) {
 		t.Errorf("expected 200 from /v1/healthz, got %d", rec.Code)
 	}
 
-	// Verify pprof diagnostic endpoints
+	// Verify pprof diagnostic endpoints are disabled by default (404)
 	pprofEndpoints := []string{
 		"/debug/pprof/",
 		"/debug/pprof/cmdline",
@@ -68,12 +68,25 @@ func TestServer_InitializationAndPprofEndpoints(t *testing.T) {
 	}
 
 	for _, ep := range pprofEndpoints {
-		t.Run("pprof_"+ep, func(t *testing.T) {
+		t.Run("default_pprof_disabled_"+ep, func(t *testing.T) {
 			r := httptest.NewRequestWithContext(reqCtx, http.MethodGet, ep, nil)
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, r)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("expected 404 from %s by default, got %d", ep, w.Code)
+			}
+		})
+	}
+
+	// Verify pprof diagnostic endpoints are enabled with WithDebug(true)
+	eDebug := server.New(h, server.WithDebug(true))
+	for _, ep := range pprofEndpoints {
+		t.Run("debug_pprof_enabled_"+ep, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(reqCtx, http.MethodGet, ep, nil)
+			w := httptest.NewRecorder()
+			eDebug.ServeHTTP(w, r)
 			if w.Code != http.StatusOK {
-				t.Errorf("expected 200 from %s, got %d", ep, w.Code)
+				t.Errorf("expected 200 from %s when debug enabled, got %d", ep, w.Code)
 			}
 		})
 	}

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"sync"
 	"time"
 
@@ -22,10 +23,10 @@ type FeedItem struct {
 // feedItemLess compares two FeedItems for descending chronological order.
 // In google/btree:
 // If a.CreatedAt is AFTER b.CreatedAt, a comes BEFORE b in the feed (so Less returns true).
-// If timestamps are equal, larger ID string comes before smaller ID string.
+// If timestamps are equal, larger ID comes before smaller ID.
 func feedItemLess(a, b *FeedItem) bool {
 	if a.CreatedAt.Equal(b.CreatedAt) {
-		return a.ID.String() > b.ID.String()
+		return bytes.Compare(a.ID[:], b.ID[:]) > 0
 	}
 	return a.CreatedAt.After(b.CreatedAt)
 }

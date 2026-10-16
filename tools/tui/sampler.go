@@ -67,6 +67,9 @@ type Sampler struct {
 	dbPool     *sql.DB
 	natsMonURL string
 	httpClient *http.Client
+
+	lastDBSample time.Time
+	cachedDBSnap SystemSnapshot
 }
 
 // NewSampler creates a new resource and pipeline sampler.
@@ -105,20 +108,33 @@ func (s *Sampler) Sample(ctx context.Context) SystemSnapshot {
 	// 1. Sample JetStream & Drainer metrics (instant HTTP call to NATS monitor)
 	s.sampleJetStream(ctx, &snap)
 
-	// 2. Query DB metrics if connected
+	// 2. Query DB metrics if connected (throttled to every 5s with 250ms timeout to avoid 1s table scans)
 	if s.dbPool != nil {
-		row := s.dbPool.QueryRowContext(ctx, `
-			SELECT 
-				COUNT(*), 
-				COALESCE(MAX(depth), 0), 
-				COUNT(*) FILTER (WHERE parent_id IS NULL), 
-				COUNT(*) FILTER (WHERE parent_id IS NOT NULL),
-				COUNT(*) FILTER (WHERE reply_count > 0)
-			FROM interactions
-		`)
-		if err := row.Scan(&snap.DBTotalRows, &snap.DBMaxDepth, &snap.DBRootPosts, &snap.DBReplies, &snap.DBReplyCounts); err == nil {
-			snap.DBConnected = true
+		if time.Since(s.lastDBSample) >= 5*time.Second {
+			dbCtx, dbCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			defer dbCancel()
+
+			row := s.dbPool.QueryRowContext(dbCtx, `
+				SELECT 
+					COUNT(*), 
+					COALESCE(MAX(depth), 0), 
+					COUNT(*) FILTER (WHERE parent_id IS NULL), 
+					COUNT(*) FILTER (WHERE parent_id IS NOT NULL),
+					COUNT(*) FILTER (WHERE reply_count > 0)
+				FROM interactions
+			`)
+			if err := row.Scan(&s.cachedDBSnap.DBTotalRows, &s.cachedDBSnap.DBMaxDepth, &s.cachedDBSnap.DBRootPosts, &s.cachedDBSnap.DBReplies, &s.cachedDBSnap.DBReplyCounts); err == nil {
+				s.cachedDBSnap.DBConnected = true
+				s.lastDBSample = time.Now()
+			}
 		}
+
+		snap.DBConnected = s.cachedDBSnap.DBConnected
+		snap.DBTotalRows = s.cachedDBSnap.DBTotalRows
+		snap.DBMaxDepth = s.cachedDBSnap.DBMaxDepth
+		snap.DBRootPosts = s.cachedDBSnap.DBRootPosts
+		snap.DBReplies = s.cachedDBSnap.DBReplies
+		snap.DBReplyCounts = s.cachedDBSnap.DBReplyCounts
 	}
 
 	// 3. Sample Kozlony Process

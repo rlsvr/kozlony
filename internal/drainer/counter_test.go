@@ -63,7 +63,7 @@ func TestCounter_RedeliveryIsIdempotent(t *testing.T) {
 	first := counterMsg(t, map[string]int{id.String(): 50})
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(first), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	if _, err := c.ProcessBatch(context.Background()); err != nil {
 		t.Fatalf("first apply failed: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCounter_KeepsHighestCountWhenOutOfOrder(t *testing.T) {
 
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(stale, fresher), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	if _, err := c.ProcessBatch(context.Background()); err != nil {
 		t.Fatalf("ProcessBatch failed: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCounter_ApplyFailureNaksMessages(t *testing.T) {
 	msg := counterMsg(t, map[string]int{id.String(): 5})
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	count, err := c.ProcessBatch(context.Background())
 	if err == nil {
 		t.Fatal("expected an error when ApplyReplyCounts fails")
@@ -175,7 +175,7 @@ func TestCounter_SkipsInvalidPayloads(t *testing.T) {
 
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(garbage, valid), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	if _, err := c.ProcessBatch(context.Background()); err != nil {
 		t.Fatalf("ProcessBatch failed: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestCounter_StopWaitsForWorkers(t *testing.T) {
 		}).
 		AnyTimes()
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{
 		DrainBatchSize:            10,
 		DrainFlushInterval:        time.Millisecond,
 		NATSConcurrentSubscribers: 1,
@@ -448,7 +448,7 @@ func TestCounter_RedeliversWhenParentRowMissing(t *testing.T) {
 	msg := counterMsg(t, map[string]int{parentID.String(): 1})
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	count, err := c.ProcessBatch(context.Background())
 	if err != nil {
 		t.Fatalf("ProcessBatch failed: %v", err)
@@ -481,7 +481,7 @@ func TestCounter_AppliesAfterParentCommits(t *testing.T) {
 	msg := counterMsg(t, map[string]int{parentID.String(): 1})
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	if _, err := c.ProcessBatch(context.Background()); err != nil {
 		t.Fatalf("ProcessBatch failed: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestCounter_GranularNakOnlyAffectedMessages(t *testing.T) {
 
 	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msgSuccess, msgMissing), nil)
 
-	c := drainer.NewCounter(mockFetcher, mockRepo, &config.Config{DrainBatchSize: 10})
+	c := drainer.NewCounter(mockFetcher, mockRepo, nil, &config.Config{DrainBatchSize: 10})
 	count, err := c.ProcessBatch(context.Background())
 	if err != nil {
 		t.Fatalf("ProcessBatch failed: %v", err)
@@ -632,7 +632,7 @@ func TestCounter_PartitionBatchFetcher(t *testing.T) {
 		DrainBatchSize:   10,
 		IngestPartitions: 16,
 	}
-	c := drainer.NewCounter(fetcher, mockRepo, cfg)
+	c := drainer.NewCounter(fetcher, mockRepo, nil, cfg)
 
 	count, err := c.ProcessBatchForPartition(context.Background(), 7)
 	if err != nil {
@@ -660,7 +660,7 @@ func TestCounter_RunWorkerPartitionDistribution(t *testing.T) {
 		DrainBatchSize:   10,
 		IngestPartitions: 4,
 	}
-	c := drainer.NewCounter(fetcher, mockRepo, cfg)
+	c := drainer.NewCounter(fetcher, mockRepo, nil, cfg)
 
 	// Worker 1 should pull from partition 0
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -683,6 +683,36 @@ func TestCounter_RunWorkerPartitionDistribution(t *testing.T) {
 
 	if workers := c.Workers(); workers != 1 {
 		t.Errorf("expected default 1 worker, got %d", workers)
+	}
+}
+
+func TestCounter_UpdatesCacheOnSuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	id := uuid.Must(uuid.NewV7())
+	mockFetcher := drainermocks.NewMockBatchFetcher(ctrl)
+	mockRepo := drainermocks.NewMockReplyCountWriter(ctrl)
+	mockCache := drainermocks.NewMockReplyCountCache(ctrl)
+
+	mockRepo.EXPECT().
+		ApplyReplyCounts(gomock.Any(), gomock.Any()).
+		Return(nil, nil)
+
+	mockCache.EXPECT().
+		UpdateReplyCount(gomock.Any(), id, 42).
+		Return(nil)
+
+	msg := counterMsg(t, map[string]int{id.String(): 42})
+	mockFetcher.EXPECT().Fetch(gomock.Any(), gomock.Any()).Return(batchOf(msg), nil)
+
+	c := drainer.NewCounter(mockFetcher, mockRepo, mockCache, &config.Config{DrainBatchSize: 10})
+	count, err := c.ProcessBatch(context.Background())
+	if err != nil {
+		t.Fatalf("ProcessBatch failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 count applied, got %d", count)
 	}
 }
 

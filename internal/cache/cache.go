@@ -117,13 +117,7 @@ func (c *ShardedMemoryCache) Get(_ context.Context, id uuid.UUID) (*database.Int
 	rootID := rootVal.(uuid.UUID)
 
 	shard := c.shardFor(rootID)
-	thread, found := shard.GetThread(rootID)
-	if !found {
-		c.nodeLookup.Delete(id)
-		return nil, ErrNotFound
-	}
-
-	node, foundNode := thread.GetNode(id)
+	node, foundNode := shard.GetNode(rootID, id, c.ttl)
 	if !foundNode {
 		c.nodeLookup.Delete(id)
 		return nil, ErrNotFound
@@ -134,31 +128,31 @@ func (c *ShardedMemoryCache) Get(_ context.Context, id uuid.UUID) (*database.Int
 // GetThread retrieves all interactions in a thread sorted chronologically.
 func (c *ShardedMemoryCache) GetThread(_ context.Context, rootID uuid.UUID) ([]*database.Interaction, error) {
 	shard := c.shardFor(rootID)
-	interactions, found := shard.GetThreadInteractions(rootID)
+	interactions, found := shard.GetThreadInteractions(rootID, c.ttl)
 	if !found {
 		return nil, ErrNotFound
 	}
-
 	return interactions, nil
 }
 
-func (c *ShardedMemoryCache) putRoot(item *database.Interaction) {
+func (c *ShardedMemoryCache) putRoot(item *database.Interaction) *LRUShard {
 	rootID := item.ID
 	shard := c.shardFor(rootID)
 	_, delta := shard.PutRoot(item)
 	c.nodeLookup.Store(item.ID, rootID)
 	c.getFeedIndex(item.GroupID).Insert(item)
 	c.addWeight(delta)
+	return shard
 }
 
-func (c *ShardedMemoryCache) putReply(item *database.Interaction) {
+func (c *ShardedMemoryCache) putReply(item *database.Interaction) *LRUShard {
 	var rootID uuid.UUID
 	if item.RootID != nil {
 		rootID = *item.RootID
 	} else if rVal, ok := c.nodeLookup.Load(*item.ParentID); ok {
 		rootID = rVal.(uuid.UUID)
 	} else {
-		return
+		return nil
 	}
 
 	shard := c.shardFor(rootID)
@@ -167,6 +161,7 @@ func (c *ShardedMemoryCache) putReply(item *database.Interaction) {
 		c.nodeLookup.Store(item.ID, rootID)
 		c.addWeight(delta)
 	}
+	return shard
 }
 
 // Put stores an interaction (root or reply) in memory.
@@ -175,13 +170,14 @@ func (c *ShardedMemoryCache) Put(_ context.Context, item *database.Interaction) 
 		return nil
 	}
 
+	var shard *LRUShard
 	if item.ParentID == nil {
-		c.putRoot(item)
+		shard = c.putRoot(item)
 	} else {
-		c.putReply(item)
+		shard = c.putReply(item)
 	}
 
-	c.enforceCapacity()
+	c.enforceCapacity(shard)
 	return nil
 }
 
@@ -207,7 +203,7 @@ func (c *ShardedMemoryCache) PutThread(_ context.Context, rootID uuid.UUID, item
 	}
 
 	c.addWeight(delta)
-	c.enforceCapacity()
+	c.enforceCapacity(shard)
 	return nil
 }
 
@@ -255,11 +251,10 @@ func (c *ShardedMemoryCache) UpdateReplyCount(_ context.Context, id uuid.UUID, c
 
 // Delete removes an interaction or entire thread.
 func (c *ShardedMemoryCache) Delete(_ context.Context, id uuid.UUID) error {
-	rootVal, ok := c.nodeLookup.Load(id)
-	if !ok {
-		return nil
+	rootID := id
+	if rootVal, ok := c.nodeLookup.Load(id); ok {
+		rootID = rootVal.(uuid.UUID)
 	}
-	rootID := rootVal.(uuid.UUID)
 
 	shard := c.shardFor(rootID)
 	thread, weight := shard.Delete(rootID)
@@ -281,12 +276,33 @@ func (c *ShardedMemoryCache) addWeight(delta int) {
 	}
 }
 
-// enforceCapacity checks if totalWeight exceeds maxCapacity and evicts the globally oldest LRU thread across shards.
-func (c *ShardedMemoryCache) enforceCapacity() {
+// enforceCapacity checks if weight exceeds capacity and evicts the oldest LRU thread.
+// When shardCap > 1 (production), each shard enforces its own weight quota in O(1).
+// For micro-capacities (e.g. tests where maxCapacity <= numShards), it finds the globally oldest thread.
+func (c *ShardedMemoryCache) enforceCapacity(targetShard ...*LRUShard) {
 	if c.maxCapacity <= 0 {
 		return
 	}
 
+	var shard *LRUShard
+	if len(targetShard) > 0 {
+		shard = targetShard[0]
+	}
+
+	shardCap := c.maxCapacity / numShards
+	if shardCap > 1 && shard != nil {
+		for shard.TotalWeight() > shardCap {
+			evicted := shard.PopOldest()
+			if evicted == nil {
+				break
+			}
+			c.cleanupThread(evicted)
+			c.totalWeight.Add(int64(-evicted.Weight))
+		}
+		return
+	}
+
+	// Micro-cache fallback (maxCapacity <= numShards or shard not specified)
 	for c.totalWeight.Load() > int64(c.maxCapacity) {
 		var oldestThread *Thread
 		var oldestShard *LRUShard

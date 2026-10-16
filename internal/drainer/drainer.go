@@ -173,7 +173,11 @@ func (d *Drainer) ProcessBatchForPartition(ctx context.Context, partition int) (
 		return 0, nil
 	}
 
-	counts, err := d.repo.InsertBatchWithCounts(ctx, interactions)
+	// Use a detached context with timeout so SIGTERM does not abort an in-flight batch commit.
+	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	counts, err := d.repo.InsertBatchWithCounts(commitCtx, interactions)
 	if err != nil {
 		log.Error().Err(err).Int("batch_size", len(interactions)).Msg("failed to insert batch into postgres, naking messages")
 		for _, m := range rawMsgs {
@@ -187,7 +191,7 @@ func (d *Drainer) ProcessBatchForPartition(ctx context.Context, partition int) (
 		_ = m.Ack()
 	}
 
-	d.publishReplyCounts(ctx, interactions, counts)
+	d.publishReplyCounts(commitCtx, interactions, counts)
 
 	log.Debug().Int("count", len(interactions)).Int("partition", partition).Msg("successfully drained micro-batch to postgres")
 	return len(interactions), nil

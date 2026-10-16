@@ -37,8 +37,9 @@ Kozlony is a high-throughput, low-latency message board and conversation service
 ┌─────────────────────────┐   Non-blocking Async Broadcast     │                    │
 │   16 DRAINER WORKERS    │────────────────────────────────────┼────────────────┐   │
 │  • 1-to-1 pinned        │   Core NATS Live Subjects          │                │   │
-│  • Multi-row unnest CTE │   LIVE.<group>.feed                │                ▼   │
-│  • ON CONFLICT DO NOTH. │   LIVE.<group>.thread.<id>         │    ┌─────────────────────────┐
+│  • Multi-row unnest CTE │   LIVE.<topic>                     │                ▼   │
+│  • ON CONFLICT DO NOTH. │   • LIVE.<groupID> (Feed)          │    ┌─────────────────────────┐
+│                         │   • LIVE.<threadID> (Thread)       │    │   ZERO-FILTER FAN-OUT   │
 └───────────┬─────────────┘                                    │    │   ZERO-FILTER FAN-OUT   │
             │                                                  │    │  • Per-topic Core NATS  │
             ▼                                                  │    │  • Direct raw byte pipe │
@@ -92,7 +93,7 @@ Kozlony is a high-throughput, low-latency message board and conversation service
    - An omitted or blank `title` is preserved rather than overwritten (`SET title = COALESCE($3, title)`), so a body-only edit can never wipe a root post's title.
 
 8. **Zero-Filter Core NATS Real-Time SSE Fan-Out Pipeline**:
-   - Built on ephemeral Core NATS pub/sub topics with zero retention overhead: `LIVE.<group_id>.feed` and `LIVE.<group_id>.thread.<root_id>`.
+   - Built on ephemeral Core NATS pub/sub topics with zero retention overhead: single-tier `LIVE.<topic>` where topic is either a board feed (`LIVE.<group_id>`, e.g., `LIVE.root`) or a conversation thread (`LIVE.<thread_root_id>`).
    - The Go HTTP layer establishes **per-topic Core NATS subscriptions dynamically on-demand with atomic reference counting**, delegating all subject trie routing to the NATS broker's native C networking layer.
    - **Zero Go JSON Deserialization / Zero Payload Filtering**: Incoming Core NATS messages are piped as raw bytes (`m.Data`) directly into client channels.
    - Delivers over **2.89M events/sec peak broadcast throughput** across 8,000 live streams with zero server connection errors.
@@ -391,7 +392,7 @@ Given the half-day time constraint of this assignment, several pragmatic archite
    - *Production Architecture*: Extend the graceful drain to explicitly wait for in-flight JetStream micro-batch drainer commits before terminating the main consumer loop, ensuring no unacked messages require redelivery on standard rolling deployments.
 
 8. **Zero-Filter SSE Fan-Out & Edge Broadcasting**:
-   - *Current Implementation*: Solved in-process via `internal/messaging/fanout/pipeline.go`. Rather than per-client JetStream subscriptions or monolithic Go-side worker filtering, the service establishes dynamic per-topic Core NATS subscriptions (`LIVE.<group_id>.feed` and `LIVE.<group_id>.thread.<root_id>`) with atomic reference counting. The NATS broker performs subject routing at the C networking layer, and Kozlony pipes raw payload bytes (`m.Data`) directly into client channels with zero JSON deserialization. Slow consumers are protected with non-blocking drops.
+   - *Current Implementation*: Solved in-process via `internal/messaging/fanout/pipeline.go`. Rather than per-client JetStream subscriptions or monolithic Go-side worker filtering, the service establishes dynamic per-topic Core NATS subscriptions (`LIVE.<topic>`: `LIVE.<group_id>` for board feeds and `LIVE.<thread_root_id>` for conversation threads) with atomic reference counting. The NATS broker performs subject routing at the C networking layer, and Kozlony pipes raw payload bytes (`m.Data`) directly into client channels with zero JSON deserialization. Slow consumers are protected with non-blocking drops.
    - *Production Architecture*: In a multi-replica cluster behind an L4/L7 load balancer (e.g., Envoy or Cloudflare), run an internal Redis or NATS pub/sub backplane to route user-to-thread presence, or terminate client SSE connections at edge points (e.g., Cloudflare Workers or Fastly Fanout) while Kozlony streams multiplexed events to edge POPs.
 
 9. **Rate Limiting & Request Limits**:

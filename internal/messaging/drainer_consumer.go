@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	qpnats "github.com/rlsvr/hirnok/pkg/nats"
@@ -49,6 +50,8 @@ func NewPartitionedDrainerConsumer(ctx context.Context, client *Client, numParti
 			consumerCfg.AckWait = client.cfg.NATSAckWait
 		}
 		consumerCfg.MaxAckPending = maxAckPendingPerPart
+		consumerCfg.MaxDeliver = 20
+		consumerCfg.BackOff = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second, 5 * time.Second}
 
 		cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
 		if err != nil {
@@ -117,6 +120,8 @@ func NewDrainerConsumer(ctx context.Context, client *Client) (*DrainerConsumer, 
 		consumerCfg.AckWait = client.cfg.NATSAckWait
 	}
 	consumerCfg.MaxAckPending = maxAckPending
+	consumerCfg.MaxDeliver = 20
+	consumerCfg.BackOff = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 2 * time.Second, 5 * time.Second}
 
 	cons, err := stream.CreateOrUpdateConsumer(ctx, consumerCfg)
 	if err != nil {

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"sort"
 	"time"
 
@@ -82,7 +83,7 @@ func (t *Thread) AllInteractionsChronological() []*database.Interaction {
 
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
-			return result[i].ID.String() < result[j].ID.String()
+			return bytes.Compare(result[i].ID[:], result[j].ID[:]) < 0
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})

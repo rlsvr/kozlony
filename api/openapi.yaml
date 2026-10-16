@@ -474,6 +474,11 @@ components:
         group_id:
           type: string
           maxLength: 64
+        root_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Thread root UUID if this is a reply.
         title:
           type: string
           nullable: true

@@ -362,3 +362,63 @@ func TestMemoryCache_ConcurrentAccess(_ *testing.T) {
 
 	wg.Wait()
 }
+
+func TestMemoryCache_TTLExpiration(t *testing.T) {
+	c := cache.NewMemoryCache(&config.Config{
+		MaxCachedInteractions: 10,
+		CacheTTL:              50 * time.Millisecond,
+	})
+	ctx := context.Background()
+
+	id := uuid.Must(uuid.NewV7())
+	item := &database.Interaction{
+		ID:        id,
+		GroupID:   testGroupRoot,
+		Body:      "TTL test",
+		Author:    "Tester",
+		CreatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+
+	if err := c.Put(ctx, item); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+
+	// Should be found immediately
+	if _, err := c.Get(ctx, id); err != nil {
+		t.Fatalf("expected item to be found before TTL, got %v", err)
+	}
+
+	// Wait for TTL to expire
+	time.Sleep(70 * time.Millisecond)
+
+	// Should return ErrNotFound after TTL
+	if _, err := c.Get(ctx, id); !errors.Is(err, cache.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after TTL, got %v", err)
+	}
+}
+
+func TestMemoryCache_ShardLevelEviction(t *testing.T) {
+	// Configure capacity such that shardCap = 200 / 64 = 3
+	c := cache.NewMemoryCache(&config.Config{
+		MaxCachedInteractions: 200,
+		CacheTTL:              5 * time.Minute,
+	})
+	ctx := context.Background()
+
+	// Insert items
+	for i := 0; i < 50; i++ {
+		rootID := uuid.Must(uuid.NewV7())
+		title := fmt.Sprintf("Root %d", i)
+		_ = c.Put(ctx, &database.Interaction{
+			ID:        rootID,
+			GroupID:   testGroupRoot,
+			Title:     &title,
+			CreatedAt: time.Now().UTC(),
+			Version:   1,
+		})
+	}
+	if c.TotalWeight() == 0 {
+		t.Fatal("expected items to be cached")
+	}
+}

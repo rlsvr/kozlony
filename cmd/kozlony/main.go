@@ -85,18 +85,17 @@ func main() {
 		repo = database.NewInteractionRepositoryWithPools(writePool, readPool)
 	}
 
+	interactionCache := cache.NewMemoryCache(cfg)
+
 	msgClient, err := messaging.Init(ctx, cfg)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to connect to NATS JetStream (continuing without NATS)")
-	} else {
-		defer msgClient.Close()
 	}
 
 	var pub handler.Publisher
 	var msgPublisher *messaging.Publisher
 	if msgClient != nil {
 		msgPublisher = messaging.NewPublisher(msgClient)
-		defer msgPublisher.Close()
 		pub = msgPublisher
 	}
 
@@ -112,7 +111,7 @@ func main() {
 		if err != nil {
 			log.Warn().Err(err).Msg("failed to create JetStream counter consumer")
 		} else {
-			replyCounter = drainer.NewCounter(counterConsumer, repo, cfg)
+			replyCounter = drainer.NewCounter(counterConsumer, repo, interactionCache, cfg)
 			replyCounter.Start(ctx)
 		}
 
@@ -128,9 +127,8 @@ func main() {
 		}
 	}
 
-	interactionCache := cache.NewMemoryCache(cfg)
 	h := handler.New(pub, repo, interactionCache)
-	e := server.New(h)
+	e := server.New(h, server.WithDebug(cfg.DebugMode))
 
 	go func() {
 		log.Info().Str("addr", cfg.Addr).Msg("starting HTTP server")
@@ -142,22 +140,38 @@ func main() {
 	<-ctx.Done()
 
 	log.Info().Msg("shutting down HTTP server...")
+
+	// 1. Close broadcaster streams first so active SSE streams exit immediately
+	// without hanging HTTP shutdown until timeout.
+	if msgPublisher != nil && msgPublisher.Broadcaster() != nil {
+		_ = msgPublisher.Broadcaster().Close()
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// 1. Stop HTTP server first so no new incoming requests generate publisher messages.
+	// 2. Stop HTTP server. If it times out or errors, force close without exiting abruptly.
 	if err := e.Shutdown(shutdownCtx); err != nil {
-		log.Fatal().Err(err).Msg("server forced to shutdown")
+		log.Error().Err(err).Msg("server forced to shutdown; closing immediately")
+		_ = e.Close()
 	}
 
-	// 2. Stop the drainer workers so in-flight InsertBatchWithCounts finishes cleanly before DB closes.
+	// 3. Stop the drainer workers so in-flight InsertBatchWithCounts finishes cleanly before DB closes.
 	if batchDrainer != nil {
 		batchDrainer.Stop()
 	}
 
-	// 3. Stop the counter workers so in-flight ApplyReplyCounts finishes cleanly before DB closes.
+	// 4. Stop the counter workers so in-flight ApplyReplyCounts finishes cleanly before DB closes.
 	if replyCounter != nil {
 		replyCounter.Stop()
+	}
+
+	// 5. Close publisher and NATS connection explicitly.
+	if msgPublisher != nil {
+		msgPublisher.Close()
+	}
+	if msgClient != nil {
+		msgClient.Close()
 	}
 
 	log.Info().Msg("server exited cleanly")

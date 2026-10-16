@@ -205,7 +205,7 @@ func setupNATSSubscriber(natsURL, groupID string) (*natsio.Conn, <-chan *natsio.
 	}
 
 	eventsChan := make(chan *natsio.Msg, 64)
-	sub, err := nc.Subscribe(fmt.Sprintf("LIVE.%s.>", groupID), func(msg *natsio.Msg) {
+	sub, err := nc.Subscribe(fmt.Sprintf("LIVE.%s", groupID), func(msg *natsio.Msg) {
 		select {
 		case eventsChan <- msg:
 		default:

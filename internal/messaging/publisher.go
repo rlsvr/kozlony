@@ -97,7 +97,7 @@ func (p *Publisher) SubscribeTopic(topic string) (blazesse.Subscriber, func(), e
 	bSub, bUnsub := p.broadcaster.Subscribe(topic)
 
 	subID := p.nextSubID.Add(1)
-	regUnsub := p.topicReg.Register([]string{topic}, subID)
+	regUnsub := p.topicReg.Register(topic, subID)
 
 	var unsubOnce sync.Once
 	teardown := func() {
@@ -238,8 +238,12 @@ func (p *Publisher) PublishInteractionEdited(_ context.Context, evt *events.Inte
 	if livePrefix == "" {
 		livePrefix = DefaultLivePrefix
 	}
-	p.publishLiveAsync(SubjectLiveTopic(livePrefix, evt.GroupID), data)
-	p.publishLiveAsync(SubjectLiveTopic(livePrefix, evt.ID), data)
+	if evt.RootID != nil && *evt.RootID != "" {
+		p.publishLiveAsync(SubjectLiveTopic(livePrefix, *evt.RootID), data)
+	} else {
+		p.publishLiveAsync(SubjectLiveTopic(livePrefix, evt.GroupID), data)
+		p.publishLiveAsync(SubjectLiveTopic(livePrefix, evt.ID), data)
+	}
 
 	return nil, nil
 }

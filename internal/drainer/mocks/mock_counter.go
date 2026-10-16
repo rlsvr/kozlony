@@ -55,3 +55,41 @@ func (mr *MockReplyCountWriterMockRecorder) ApplyReplyCounts(ctx, counts any) *g
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ApplyReplyCounts", reflect.TypeOf((*MockReplyCountWriter)(nil).ApplyReplyCounts), ctx, counts)
 }
+
+// MockReplyCountCache is a mock of ReplyCountCache interface.
+type MockReplyCountCache struct {
+	ctrl     *gomock.Controller
+	recorder *MockReplyCountCacheMockRecorder
+	isgomock struct{}
+}
+
+// MockReplyCountCacheMockRecorder is the mock recorder for MockReplyCountCache.
+type MockReplyCountCacheMockRecorder struct {
+	mock *MockReplyCountCache
+}
+
+// NewMockReplyCountCache creates a new mock instance.
+func NewMockReplyCountCache(ctrl *gomock.Controller) *MockReplyCountCache {
+	mock := &MockReplyCountCache{ctrl: ctrl}
+	mock.recorder = &MockReplyCountCacheMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockReplyCountCache) EXPECT() *MockReplyCountCacheMockRecorder {
+	return m.recorder
+}
+
+// UpdateReplyCount mocks base method.
+func (m *MockReplyCountCache) UpdateReplyCount(ctx context.Context, id uuid.UUID, count int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateReplyCount", ctx, id, count)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateReplyCount indicates an expected call of UpdateReplyCount.
+func (mr *MockReplyCountCacheMockRecorder) UpdateReplyCount(ctx, id, count any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateReplyCount", reflect.TypeOf((*MockReplyCountCache)(nil).UpdateReplyCount), ctx, id, count)
+}

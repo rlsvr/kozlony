@@ -29,17 +29,11 @@ type ReplyCountWriter interface {
 	ApplyReplyCounts(ctx context.Context, counts map[uuid.UUID]int) ([]uuid.UUID, error)
 }
 
-// Counter applies recalculated reply counts produced by the drainer.
-//
-// It exists to take reply_count writes out of the drainer's insert transaction. The
-// drainer previously incremented reply_count while holding a transaction open for a whole
-// batch, which held a row-level exclusive lock on every touched parent until COMMIT and
-// serialized all other writers against hot threads. Here each batch is applied in its own
-// small transaction, so those locks are held for microseconds.
-//
-// Redelivery is safe without any dedup bookkeeping: the drainer sends absolute totals, and
-// applying the same total twice leaves the same value. ApplyReplyCounts additionally guards
-// monotonicity so a delayed event cannot walk the count backwards.
+// ReplyCountCache updates cached reply counts.
+type ReplyCountCache interface {
+	UpdateReplyCount(ctx context.Context, id uuid.UUID, count int) error
+}
+
 // Counter applies recalculated reply counts produced by the drainer.
 //
 // It exists to take reply_count writes out of the drainer's insert transaction. The
@@ -56,6 +50,7 @@ type Counter struct {
 	partFetcher   PartitionBatchFetcher
 	numPartitions int
 	repo          ReplyCountWriter
+	cache         ReplyCountCache
 	batchSize     int
 	flushInterval time.Duration
 	workers       int
@@ -65,7 +60,7 @@ type Counter struct {
 }
 
 // NewCounter creates a new Counter instance.
-func NewCounter(fetcher BatchFetcher, repo ReplyCountWriter, cfg *config.Config) *Counter {
+func NewCounter(fetcher BatchFetcher, repo ReplyCountWriter, cache ReplyCountCache, cfg *config.Config) *Counter {
 	batchSize := 500
 	flushInterval := 50 * time.Millisecond
 	workers := 1
@@ -89,6 +84,7 @@ func NewCounter(fetcher BatchFetcher, repo ReplyCountWriter, cfg *config.Config)
 		fetcher:       fetcher,
 		numPartitions: numPartitions,
 		repo:          repo,
+		cache:         cache,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		workers:       workers,
@@ -170,13 +166,31 @@ func (c *Counter) ProcessBatchForPartition(ctx context.Context, partition int) (
 		return 0, nil
 	}
 
-	missing, err := c.repo.ApplyReplyCounts(ctx, counts)
+	// Use a detached context for the database commit so SIGTERM does not abort
+	// an in-flight batch write.
+	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer commitCancel()
+
+	missing, err := c.repo.ApplyReplyCounts(commitCtx, counts)
 	if err != nil {
 		log.Error().Err(err).Int("interactions", len(counts)).Msg("counter: failed to apply reply counts, naking messages")
 		for _, m := range rawMsgs {
 			_ = m.Nak()
 		}
 		return 0, fmt.Errorf("apply reply counts: %w", err)
+	}
+
+	missingSet := make(map[uuid.UUID]struct{}, len(missing))
+	for _, id := range missing {
+		missingSet[id] = struct{}{}
+	}
+
+	if c.cache != nil {
+		for id, count := range counts {
+			if _, isMissing := missingSet[id]; !isMissing {
+				_ = c.cache.UpdateReplyCount(commitCtx, id, count)
+			}
+		}
 	}
 
 	// A reply can be drained before the batch that creates its parent commits, so the
@@ -188,11 +202,6 @@ func (c *Counter) ProcessBatchForPartition(ctx context.Context, partition int) (
 	// succeeded are acked immediately so a single uncommitted parent doesn't hold up
 	// or exhaust delivery attempts for unrelated counter events.
 	if len(missing) > 0 {
-		missingSet := make(map[uuid.UUID]struct{}, len(missing))
-		for _, id := range missing {
-			missingSet[id] = struct{}{}
-		}
-
 		log.Warn().
 			Int("missing", len(missing)).
 			Int("interactions", len(counts)).

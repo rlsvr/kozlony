@@ -16,7 +16,7 @@ require (
 	github.com/rlsvr/blazesse v0.0.0-20261016040715-37d03784b8f2
 	github.com/rlsvr/blazesse-echo v0.0.0-20261016040825-c7686e98b172
 	github.com/rlsvr/hirnok v0.0.0-20261015212726-8775a5a6726e
-	github.com/rlsvr/inas v0.0.0-20261016034335-a59c88b503f7
+	github.com/rlsvr/inas v0.0.0-20261016090819-ba51006c198b
 	github.com/rs/zerolog v1.35.1
 	github.com/sethvargo/go-envconfig v1.4.3
 	github.com/stretchr/testify v1.11.1
@@ -64,3 +64,4 @@ replace github.com/rlsvr/inas => /media/storage/projects/inas
 
 replace github.com/rlsvr/blazesse => /media/storage/projects/sse
 
+replace github.com/rlsvr/hirnok => /media/storage/projects/hirnok

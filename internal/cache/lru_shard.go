@@ -39,9 +39,9 @@ func (s *LRUShard) GetThread(rootID uuid.UUID) (*Thread, bool) {
 	return thread, true
 }
 
-// GetThreadInteractions retrieves all interactions in a thread sorted chronologically
-// while holding the shard lock to prevent concurrent map modification during iteration.
-func (s *LRUShard) GetThreadInteractions(rootID uuid.UUID) ([]*database.Interaction, bool) {
+// GetNode retrieves a specific interaction from a thread while holding the shard lock
+// to prevent concurrent map read/write data races.
+func (s *LRUShard) GetNode(rootID, nodeID uuid.UUID, ttl time.Duration) (*database.Interaction, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -49,6 +49,30 @@ func (s *LRUShard) GetThreadInteractions(rootID uuid.UUID) ([]*database.Interact
 	if !ok {
 		return nil, false
 	}
+	if ttl > 0 && time.Since(thread.LastAccess) > ttl {
+		return nil, false
+	}
+	thread.LastAccess = time.Now()
+	s.promote(thread)
+
+	node, found := thread.GetNode(nodeID)
+	return node, found
+}
+
+// GetThreadInteractions retrieves all interactions in a thread sorted chronologically
+// while holding the shard lock to prevent concurrent map modification during iteration.
+func (s *LRUShard) GetThreadInteractions(rootID uuid.UUID, ttl time.Duration) ([]*database.Interaction, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	thread, ok := s.threads[rootID]
+	if !ok {
+		return nil, false
+	}
+	if ttl > 0 && time.Since(thread.LastAccess) > ttl {
+		return nil, false
+	}
+	thread.LastAccess = time.Now()
 	s.promote(thread)
 	return thread.AllInteractionsChronological(), true
 }
@@ -174,7 +198,9 @@ func (s *LRUShard) UpdateReplyCount(rootID uuid.UUID, nodeID uuid.UUID, count in
 	if !ok {
 		return false
 	}
-	node.ReplyCount = count
+	cloned := *node
+	cloned.ReplyCount = count
+	thread.UpdateNode(&cloned)
 	return true
 }
 

@@ -28,10 +28,72 @@ var _ server.ServerInterface = (*Handler)(nil)
 const (
 	defaultGroupID         = "root"
 	errInteractionNotFound = "interaction not found"
+	errInvalidGroupID      = "invalid group_id: must be 1-64 alphanumeric characters, underscores, or hyphens"
 	maxTitleLength         = 255
 	maxBodyLength          = 65535
 	maxAuthorLength        = 100
 )
+
+func isAllowedGroupChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+func isValidGroupID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isAllowedGroupChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCreateInteraction(req *server.CreateInteractionRequest, params server.CreateInteractionParams) (string, string) {
+	if strings.ContainsRune(req.Author, '\x00') || strings.ContainsRune(req.Body, '\x00') {
+		return "", "payload must not contain null bytes"
+	}
+
+	author := strings.TrimSpace(req.Author)
+	if author == "" || len(req.Author) > maxAuthorLength {
+		return "", "author is required and must not exceed 100 characters"
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" || len(req.Body) > maxBodyLength {
+		return "", "body is required and must not exceed 65535 characters"
+	}
+	if req.Title != nil {
+		if strings.ContainsRune(*req.Title, '\x00') {
+			return "", "title must not contain null bytes"
+		}
+		if len(*req.Title) > maxTitleLength {
+			return "", "title must not exceed 255 characters"
+		}
+	}
+
+	// Title is required for root interactions
+	if req.ParentId == nil {
+		if req.Title == nil || strings.TrimSpace(*req.Title) == "" {
+			return "", "title is required for root posts"
+		}
+	}
+
+	groupID := defaultGroupID
+	if req.GroupId != nil && *req.GroupId != "" {
+		groupID = *req.GroupId
+	}
+	if !isValidGroupID(groupID) {
+		return "", errInvalidGroupID
+	}
+
+	idempotencyKey := strings.TrimSpace(params.IdempotencyKey)
+	if idempotencyKey == "" {
+		return "", "Idempotency-Key header is required"
+	}
+
+	return groupID, ""
+}
 
 // Publisher sends interaction events to the JetStream message broker and subscribes to real-time events.
 type Publisher interface {
@@ -109,39 +171,12 @@ func (h *Handler) CreateInteraction(ctx echo.Context, params server.CreateIntera
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "invalid request payload"})
 	}
 
-	if req.Author == "" || len(req.Author) > maxAuthorLength {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "author is required and must not exceed 100 characters"})
-	}
-	if req.Body == "" || len(req.Body) > maxBodyLength {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "body is required and must not exceed 65535 characters"})
-	}
-	if req.Title != nil && len(*req.Title) > maxTitleLength {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
-	}
-
-	// Title is required for root interactions
-	if req.ParentId == nil {
-		if req.Title == nil || strings.TrimSpace(*req.Title) == "" {
-			return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
-				Error: "title is required for root posts",
-			})
-		}
-	}
-
-	groupID := defaultGroupID
-	if req.GroupId != nil && *req.GroupId != "" {
-		groupID = *req.GroupId
+	groupID, errMsg := validateCreateInteraction(&req, params)
+	if errMsg != "" {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: errMsg})
 	}
 
 	idempotencyKey := strings.TrimSpace(params.IdempotencyKey)
-
-	// The generated wrapper already rejects a missing header with 400; this guards
-	// direct handler invocation and an all-whitespace key.
-	if idempotencyKey == "" {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{
-			Error: "Idempotency-Key header is required",
-		})
-	}
 
 	newID := resolveInteractionID(idempotencyKey)
 
@@ -251,11 +286,20 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "invalid request payload"})
 	}
 
-	if req.Body == "" || len(req.Body) > maxBodyLength {
+	if strings.ContainsRune(req.Body, '\x00') {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "body must not contain null bytes"})
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" || len(req.Body) > maxBodyLength {
 		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "body is required and must not exceed 65535 characters"})
 	}
-	if req.Title != nil && len(*req.Title) > maxTitleLength {
-		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
+	if req.Title != nil {
+		if strings.ContainsRune(*req.Title, '\x00') {
+			return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not contain null bytes"})
+		}
+		if len(*req.Title) > maxTitleLength {
+			return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: "title must not exceed 255 characters"})
+		}
 	}
 
 	// An omitted or blank title means "leave the title unchanged". The repository
@@ -294,10 +338,16 @@ func (h *Handler) UpdateInteraction(ctx echo.Context, id openapi_types.UUID) err
 		if updated.UpdatedAt != nil {
 			updatedAt = *updated.UpdatedAt
 		}
+		var rootID *string
+		if updated.RootID != nil {
+			s := updated.RootID.String()
+			rootID = &s
+		}
 		evt := events.InteractionEditedEvent{
 			Body:      updated.Body,
 			GroupID:   updated.GroupID,
 			ID:        updated.ID.String(),
+			RootID:    rootID,
 			Title:     updated.Title,
 			UpdatedAt: updatedAt,
 			Version:   updated.Version,
@@ -316,6 +366,9 @@ func (h *Handler) ListInteractions(ctx echo.Context, params server.ListInteracti
 	groupID := defaultGroupID
 	if params.GroupId != nil && *params.GroupId != "" {
 		groupID = *params.GroupId
+	}
+	if !isValidGroupID(groupID) {
+		return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: errInvalidGroupID})
 	}
 
 	limit := 20
@@ -456,19 +509,23 @@ func (h *Handler) GetInteraction(ctx echo.Context, id openapi_types.UUID) error 
 	}
 
 	// If a nested reply was requested, return that reply with its subtree of replies
-	var directReplies []server.Interaction
+	inSubtree := map[uuid.UUID]bool{target.ID: true}
+	var subtreeReplies []server.Interaction
 	for _, item := range thread {
-		if item.ParentID != nil && *item.ParentID == target.ID {
-			directReplies = append(directReplies, toAPIInteraction(item))
+		if item.ParentID != nil && inSubtree[*item.ParentID] {
+			inSubtree[item.ID] = true
+			if item.ID != target.ID {
+				subtreeReplies = append(subtreeReplies, toAPIInteraction(item))
+			}
 		}
 	}
-	if directReplies == nil {
-		directReplies = []server.Interaction{}
+	if subtreeReplies == nil {
+		subtreeReplies = []server.Interaction{}
 	}
 
 	return ctx.JSON(http.StatusOK, server.InteractionDetail{
 		Interaction: toAPIInteraction(target),
-		Replies:     directReplies,
+		Replies:     subtreeReplies,
 	})
 }
 
@@ -485,6 +542,9 @@ func (h *Handler) EventsInteractions(ctx echo.Context, params server.EventsInter
 
 	targetTopic := defaultGroupID
 	if params.GroupId != nil && *params.GroupId != "" {
+		if !isValidGroupID(*params.GroupId) {
+			return ctx.JSON(http.StatusBadRequest, server.ErrorResponse{Error: errInvalidGroupID})
+		}
 		targetTopic = *params.GroupId
 	}
 	if rootUUID != nil {
