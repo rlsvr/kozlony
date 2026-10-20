@@ -40,7 +40,7 @@ Kozlony is a high-throughput, low-latency message board and conversation service
 │  • Multi-row unnest CTE │   LIVE.<topic>                     │                ▼   │
 │  • ON CONFLICT DO NOTH. │   • LIVE.<groupID> (Feed)          │    ┌─────────────────────────┐
 │                         │   • LIVE.<threadID> (Thread)       │    │   ZERO-FILTER FAN-OUT   │
-└───────────┬─────────────┘                                    │    │   ZERO-FILTER FAN-OUT   │
+└───────────┬─────────────┘                                    │    │  • Ephemeral pub/sub    │
             │                                                  │    │  • Per-topic Core NATS  │
             ▼                                                  │    │  • Direct raw byte pipe │
 ┌─────────────────────────┐        Batch Bulk Insert           │    │  • Dynamic ref-counting │
@@ -209,6 +209,10 @@ Note that `.env` is honoured by `make` targets only. The binary itself reads pla
 ```bash
 make run
 ```
+Or directly without `make`:
+```bash
+go run ./cmd/kozlony
+```
 
 ---
 
@@ -288,28 +292,45 @@ A dedicated load-generation and pressure-controlling CLI app inspired by product
 - **Hierarchical Conversation Growth**: Automatically generates root discussions and attaches multi-level nested replies (`depth >= 1`), building realistic conversation trees.
 - **Optimistic Concurrency Stress**: Continuously issues concurrent edits (`PUT /v1/interactions/:id`), asserting version updates and conflict (`409`) absorption.
 - **Configurable Pressure Control**:
-  - Simulated active concurrent users (`-users`, default `20`).
+  - Simulated active user identity population (`-users`, default `1000`).
+  - Worker pool concurrency (`-workers`, default `200`, max `2000`).
+  - Real-time SSE stream subscribers (`-with-clients`, e.g. `1000`).
+  - Dynamic stream topic switching (`-client-switch-interval`, default `10s` with $\pm 20\%$ random jitter to prevent reconnect storms).
+  - Thread vs board feed ratio (`-thread-client-ratio`, default `0.7` = 70% thread subscribers, 30% feed subscribers).
   - Global requests-per-second rate limiter ceiling (`-rps`, default unconstrained `0`).
-  - Per-user think-time pacing jitter (`-min-think` to `-max-think`, default `1s` to `3s`).
+  - Per-user think-time cooldown pacing (`-min-think` to `-max-think`, default `0` for continuous maximum throughput).
+  - Configurable interaction body lengths (`-min-body` to `-max-body`, default `0` to `1000` chars).
   - Action probability weights (`-weight-root`, `-weight-reply`, `-weight-edit`, `-weight-read`).
-- **Telemetry Publishing**: Live runner console line and atomic 1-second status broadcast to `/tmp/kozlony-stress-status.json` for external observers.
+- **Telemetry Publishing**: Live runner console line and atomic 1-second status broadcast to `/tmp/kozlony-stress-status.json` for external observers (like `tools/tui`).
 
 #### Running the Stress Test:
+
+Run directly using `go run ./tools/stress` (or build once with `make build-stress` and execute `./bin/stresstest`, or via `make stress ARGS="..."`):
+
 ```bash
-# Compile and run with defaults (20 users, 1..3s think time, indefinite duration)
-make stress
+# 1. Standard mixed workload (5000 users, 200 workers, 1000 live SSE subscribers)
+go run ./tools/stress -url http://localhost:8080 -workers 200 -users 5000 \
+  -weight-root 20 -weight-reply 50 -weight-edit 15 -weight-read 15 \
+  -with-clients 1000 -client-switch-interval 10s -thread-client-ratio 0.7 -duration 30s
 
-# Custom run: 50 concurrent users, rate-limited at 200 req/s, 10s test duration
-make stress ARGS="-users 50 -rps 200 -duration 10s"
+# 2. Absolute Maximum Ingestion Saturator (36,000+ req/s sustained)
+# Slashes think time to 0, focuses 100% of 400 workers on pure root post creation
+go run ./tools/stress -url http://localhost:8080 -workers 400 -users 10000 \
+  -weight-root 100 -weight-reply 0 -weight-edit 0 -weight-read 0 \
+  -duration 15s
 
-# Directly via binary
-./bin/stresstest -url http://localhost:8080 -users 100 -rps 500 -min-think 200ms -max-think 800ms
+# 3. Absolute Maximum Real-Time Fan-Out Storm (15,000 concurrent SSE clients + 500k+ ev/s)
+# Note: Raising client OS socket limit (ulimit -n 65535) is required to hold 15k outbound TCP sockets
+bash -c "ulimit -n 65535 && go run ./tools/stress -url http://localhost:8080 \
+  -workers 200 -users 10000 -weight-root 50 -weight-reply 50 \
+  -with-clients 15000 -client-switch-interval 5s -thread-client-ratio 0.8 \
+  -duration 30s"
 ```
 
 ---
 
 ### Interactive TUI Stack & Load Monitor (`tools/tui`)
-An interactive, **pure read-only** single-pane terminal dashboard built with **Bubble Tea** and **Lip Gloss**:
+An interactive, **pure read-only** single-pane terminal dashboard built with **Bubble Tea** and **Lip Gloss** for real-time observability and live stress inspection:
 
 > *The TUI is strictly a monitor — it does not start runs, stop runs, or mutate the system. It discovers and renders active status from the workload runner, PostgreSQL, and Docker containers.*
 
@@ -346,10 +367,10 @@ An interactive, **pure read-only** single-pane terminal dashboard built with **B
 
 #### Running the Workflow:
 ```bash
-# Terminal 1: Start the read-only monitor
+# Terminal 1: Start the read-only monitor (or: go run ./tools/tui)
 make tui
 
-# Terminal 2: Run the workload generator
+# Terminal 2: Run the workload generator (or: go run ./tools/stress -users 100 -rps 1000)
 make stress ARGS="-users 100 -rps 1000"
 ```
 
@@ -359,9 +380,17 @@ make stress ARGS="-users 100 -rps 1000"
 
 Given the half-day time constraint of this assignment, several pragmatic architectural tradeoffs were made. In a production rollout, the following enhancements would be prioritized:
 
-1. **User Authentication & Authorization (AuthN/AuthZ)**:
+1. **User Authentication, Authorization & Identity Migration (AuthN/AuthZ)**:
    - *Current Implementation*: Interactions accept a user display name (`author: string`), suitable for open/guest discussion boards without signup friction.
-   - *Production Architecture*: Introduce an OIDC / OAuth2 JWT Bearer authentication middleware (e.g. Keycloak, Auth0, or Authentik). The authenticated subject `user_id` would be injected into the Echo request context, preventing identity spoofing and enforcing granular Role-Based Access Control (RBAC) so that only authors or moderators can edit content.
+   - *Production Architecture & Brownfield Migration*:
+     - **Identity Architecture**: Introduce an OIDC / OAuth2 JWT Bearer authentication middleware (e.g., Keycloak, Auth0, or Authentik). Authenticated claims inject a verified `user_id UUID` into the Echo request context, enforcing granular Role-Based Access Control (RBAC) so only original authors or board moderators can edit or moderate content.
+     - **Backward Compatibility & Legacy Author Preservation**:
+       - To preserve existing interactions, introduce a nullable `user_id UUID REFERENCES users(id)` column while retaining the existing `author` column as the immutable display name.
+       - Create a partial index: `CREATE INDEX idx_interactions_user_id ON interactions(user_id) WHERE user_id IS NOT NULL;`. This guarantees that legacy rows (`user_id = NULL`) consume zero index bytes, preserving fast index seeks for authenticated user lookups.
+     - **Search & Discovery Strategy**:
+       - *User Activity*: Indexed lookups via `idx_interactions_user_id` retrieve all interactions authored by a registered user.
+       - *Fuzzy / Text Search*: For cross-searching both legacy guest authors and registered users, apply a PostgreSQL Trigram (`pg_trgm`) GIN index on `author` (`CREATE INDEX idx_interactions_author_trgm ON interactions USING GIN (author gin_trgm_ops);`) or full-text search (`tsvector`) across author and interaction content.
+     - **Identity Linking (Claim / Backfill)**: Provide an optional lazy account-linking flow where users claiming past anonymous contributions can associate legacy session cookies or claim tokens to their new `user_id` via a background reconciliation worker.
 
 2. **Hierarchical Soft Deletion & Moderation**:
    - *Current Implementation*: Content mutations are performed via version-controlled edits; deletion endpoints are omitted.
@@ -375,8 +404,8 @@ Given the half-day time constraint of this assignment, several pragmatic archite
    - *Current Implementation*: In addition to unit tests (`gomock`, `-race`) and the `scripts/blackbox` suite, the repository includes a custom high-concurrency workload generator (`tools/stress`), reproducible cache benchmarks (`internal/cache/cache_bench_test.go`), and a live single-pane terminal dashboard (`tools/tui`).
    - *Measured Performance*:
      - In-memory hot cache achieves ~30 ns for single node seek, ~450 ns for thread hierarchy traversal, and ~2 µs for feed page index seeks.
-     - Asynchronous write path sustained **29,624 req/s** (with **35,376 req/s peak**) on a 3.7-million-row database with 98.4% success rate and zero JetStream consumer lag across all 16 partitions.
-     - Live SSE limit testing demonstrated sustained delivery of **2.89M events/second** across 8,000 active concurrent SSE streams with zero server connection errors and zero Go struct filtering overhead.
+     - Asynchronous write path sustained **30,000–36,000 req/s** (with **36,010 req/s sustained** on pure root post ingest) on a multi-million-row database with zero JetStream consumer lag across all 16 partitions.
+     - Real-time SSE fan-out sustained delivery of up to **15,000 concurrent live SSE streams** and multi-million event/sec broker broadcast with zero server connection errors and zero Go struct filtering overhead.
    - *Production Architecture*: Pair the local test runners with distributed load injectors (e.g. k6 clusters) across multi-node topologies, combined with automated chaos fault-injection (killing PostgreSQL primary or NATS leader mid-transaction) in continuous integration pipelines.
 
 5. **Observability — Tracing & Metrics**:
@@ -388,11 +417,11 @@ Given the half-day time constraint of this assignment, several pragmatic archite
    - *Production Architecture*: Make `DATABASE_URL` and `NATS_URL` strictly required in non-development environments. Source credentials from an enterprise secret manager (HashiCorp Vault, AWS Secrets Manager) with automated rotation, and enforce TLS with mutual certificate verification.
 
 7. **Graceful Shutdown**:
-   - *Current Implementation*: `SIGINT`/`SIGTERM` are trapped via `signal.NotifyContext`. The HTTP server initiates graceful shutdown with a 10s budget (`e.Shutdown`), stopping active listeners. Dedicated counter workers (`replyCounter.Stop()`) are drained and closed before database pool termination (`defer dbPool.Close()`) and NATS client termination (`defer msgClient.Close()`), eliminating teardown race conditions.
-   - *Production Architecture*: Extend the graceful drain to explicitly wait for in-flight JetStream micro-batch drainer commits before terminating the main consumer loop, ensuring no unacked messages require redelivery on standard rolling deployments.
+   - *Current Implementation*: `SIGINT`/`SIGTERM` are trapped via `signal.NotifyContext`. The shutdown sequence explicitly closes active SSE broadcasters first, shuts down the Echo HTTP listener with a 10s budget (`e.Shutdown`), stops the 16-way batch drainer workers (`batchDrainer.Stop()`) waiting for in-flight database `COPY` transactions to commit, stops reply counter workers (`replyCounter.Stop()`), and finally terminates the NATS client and PostgreSQL connection pools. This guarantees zero mid-transaction database cuts.
+   - *Production Architecture*: Add active connection drain metrics and readiness probe unregistration (`503 Service Unavailable` on `/v1/readyz`) prior to socket closure to allow upstream ingress proxies (Envoy / Kubernetes Ingress) to route traffic away before local shutdown commences.
 
-8. **Zero-Filter SSE Fan-Out & Edge Broadcasting**:
-   - *Current Implementation*: Solved in-process via `internal/messaging/fanout/pipeline.go`. Rather than per-client JetStream subscriptions or monolithic Go-side worker filtering, the service establishes dynamic per-topic Core NATS subscriptions (`LIVE.<topic>`: `LIVE.<group_id>` for board feeds and `LIVE.<thread_root_id>` for conversation threads) with atomic reference counting. The NATS broker performs subject routing at the C networking layer, and Kozlony pipes raw payload bytes (`m.Data`) directly into client channels with zero JSON deserialization. Slow consumers are protected with non-blocking drops.
+8. **Zero-Filter SSE Fan-Out & Dynamic Topic Management**:
+   - *Current Implementation*: Built directly into `internal/messaging/publisher.go` utilizing a lock-free `blazesse.Broadcaster` and dynamic actor-based topic registry (`inas/pkg/registry`). Rather than per-client JetStream subscriptions or monolithic Go-side worker filtering, the service establishes dynamic per-topic Core NATS subscriptions (`LIVE.<topic>`: `LIVE.<group_id>` for board feeds and `LIVE.<thread_root_id>` for conversation threads) with debounced reference counting. The NATS broker performs subject routing at the C networking layer, and Kozlony pipes raw payload bytes (`m.Data`) directly into client channels with zero JSON deserialization. Slow consumers are protected with non-blocking drops.
    - *Production Architecture*: In a multi-replica cluster behind an L4/L7 load balancer (e.g., Envoy or Cloudflare), run an internal Redis or NATS pub/sub backplane to route user-to-thread presence, or terminate client SSE connections at edge points (e.g., Cloudflare Workers or Fastly Fanout) while Kozlony streams multiplexed events to edge POPs.
 
 9. **Rate Limiting & Request Limits**:
@@ -400,5 +429,5 @@ Given the half-day time constraint of this assignment, several pragmatic archite
    - *Production Architecture*: Apply Echo's rate-limiter middleware with a token bucket keyed by authenticated subject (falling back to IP for anonymous boards), stricter per-route limits on `POST /v1/interactions` to protect the JetStream stream from write floods, and an explicit cap on concurrent SSE connections per replica.
 
 10. **Resiliency — Retry, Backoff & Circuit Breaking**:
-    - *Current Implementation*: There is no retry, backoff, or circuit breaker anywhere in the service. When `InsertBatch` fails the drainer `Nak`s every message and relies on JetStream redelivery after `AckWait` (30s), while the run loop's only throttle is a fixed `100ms` sleep — so a downed PostgreSQL means roughly ten failing batches per second, indefinitely, with nothing to stop the pressure. The consumer sets neither `MaxDeliver` nor `BackOff`, so a message that can never be inserted is redelivered forever and never reaches the DLQ; the DLQ currently handles only poison payloads (unmarshal and validation failures) on first failure. The publish path makes a single attempt and surfaces a 500 on failure.
-    - *Production Architecture*: Put a circuit breaker in front of each dependency (PostgreSQL, JetStream) so an outage trips it open rather than hammering a dead service, and replace the fixed sleep with exponential backoff plus jitter. Configure `MaxDeliver` with a `BackOff` schedule on the consumer so a permanently-failing message lands in the DLQ after a bounded number of attempts instead of looping indefinitely, reserving the DLQ for genuinely poison traffic rather than transient dependency failure. Retry the publish path with jittered, bounded attempts before returning 5xx.
+    - *Current Implementation*: JetStream pull consumers (`drainer_consumer.go` and `counter_consumer.go`) configure `MaxDeliver = 20` with exponential retry backoff schedules (`[100ms, 500ms, 2s, 5s]`). Unrecoverable poison payloads are trapped by the drainer and routed to `BOARD.dlq`. Database write replay is absorbed idempotently via `ON CONFLICT (id) DO NOTHING`.
+    - *Production Architecture*: Introduce client-side circuit breakers (e.g., `sony/gobreaker`) in front of the HTTP publish path so that downstream JetStream transient partitions fail fast with bounded retries before returning HTTP 5xx to clients.
